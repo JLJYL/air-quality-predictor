@@ -1,0 +1,9 @@
+flask
+pandas
+numpy
+xgboost
+scikit-learn
+requests
+meteostat
+matplotlib
+seaborn

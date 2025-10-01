@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>AQI 預測系統</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>AQI 預測系統</h1>
+  <button onclick="loadData()">取得最新預測</button>
+  <div id="output"></div>
+  <canvas id="aqiChart" width="400" height="200"></canvas>
+
+  <script>
+    async function loadData() {
+      let res = await fetch("https://my-aqi-api.onrender.com/predict");
+      let data = await res.json();
+
+      // 顯示文字結果
+      document.getElementById("output").innerText =
+        "AQI: " + data.aqi + " | PM2.5: " + data.pm25 + " µg/m³";
+
+      // 畫圖 (例如 AQI 預測)
+      const ctx = document.getElementById('aqiChart');
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: data.timestamps,
+          datasets: [{
+            label: 'AQI 預測',
+            data: data.aqi_series,
+            borderColor: 'red',
+            fill: false
+          }]
+        }
+      });
+    }
+  </script>
+</body>
+</html>
