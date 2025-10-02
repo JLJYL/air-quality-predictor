@@ -170,5 +170,46 @@
         // 頁面載入完成後執行
         window.onload = updateAqiColors;
     </script>
+                    <h2>未來 24 小時 AQI 預測</h2>
+<canvas id="aqiChart"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    const predictions = {{ predictions|tojson }};
+    if (predictions.length > 0) {
+        const labels = predictions.map(p => p.datetime_local);
+        const values = predictions.map(p => p.aqi_pred);
+
+        const ctx = document.getElementById('aqiChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'AQI 預測',
+                    data: values,
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    fill: true,
+                    tension: 0.2
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { position: 'top' },
+                    title: { display: true, text: '未來 24 小時 AQI 預測' }
+                },
+                scales: {
+                    x: { title: { display: true, text: '時間' } },
+                    y: { title: { display: true, text: 'AQI 指數' } }
+                }
+            }
+        });
+    } else {
+        document.getElementById('aqiChart').outerHTML = "<p>⚠️ 無法取得預測資料，顯示即時觀測 AQI</p>";
+    }
+</script>
+
 </body>
 </html>
