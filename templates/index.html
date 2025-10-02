@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <title>{{ city_name }} 未來 24 小時 AQI 預測</title>
+    <style>
+        /* ... (CSS 樣式，用於美化和 AQI 顏色分類) ... */
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; margin-bottom: 20px; text-align: center; }
+        .max-aqi-box { text-align: center; padding: 20px; background-color: #ecf0f1; border-radius: 8px; margin-bottom: 30px; }
+        .max-aqi-value { font-size: 3em; font-weight: bold; }
+        /* ... (其餘 CSS 樣式) ... */
+        
+        /* AQI 顏色分類 */
+        .aqi-category-0-50 { border-left-color: #00e400; background-color: #e6ffe6; } 
+        .aqi-category-51-100 { border-left-color: #ffff00; background-color: #ffffe6; }
+        .aqi-category-101-150 { border-left-color: #ff7e00; background-color: #fff4e6; } 
+        .aqi-category-151-200 { border-left-color: #ff0000; background-color: #ffe6e6; }
+        .aqi-category-201-300 { border-left-color: #8f3e99; background-color: #fbe6ff; }
+        .aqi-category-301-up { border-left-color: #7e0023; background-color: #ffe6eb; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>{{ city_name }} 未來 24 小時空氣品質預測系統</h1>
+    <p>數據來源：OpenAQ V3 與 Meteostat 天氣數據。模型：XGBoost 多目標遞迴預測。</p>
+
+    <div class="max-aqi-box">
+        <div class="aqi-label">預測未來 24 小時最高 AQI 為：</div>
+        {% set aqi_class = "" %}
+        {% if max_aqi != "N/A" %}
+            {% if max_aqi <= 50 %}{% set aqi_class = "aqi-category-0-50" %}
+            {% elif max_aqi <= 100 %}{% set aqi_class = "aqi-category-51-100" %}
+            {% elif max_aqi <= 150 %}{% set aqi_class = "aqi-category-101-150" %}
+            {% elif max_aqi <= 200 %}{% set aqi_class = "aqi-category-151-200" %}
+            {% elif max_aqi <= 300 %}{% set aqi_class = "aqi-category-201-300" %}
+            {% else %}{% set aqi_class = "aqi-category-301-up" %}{% endif %}
+        {% endif %}
+        <div class="max-aqi-value {{ aqi_class }}" style="padding: 10px; border-radius: 8px;">{{ max_aqi }}</div>
+    </div>
+
+    <h2>未來 24 小時小時 AQI 詳細列表 (當地時間)</h2>
+    
+    {% if aqi_predictions %}
+        <ul class="aqi-list">
+            {% for item in aqi_predictions %}
+                {% set aqi_class = "" %}
+                {% if item.aqi <= 50 %}{% set aqi_class = "aqi-category-0-50" %}
+                {% elif item.aqi <= 100 %}{% set aqi_class = "aqi-category-51-100" %}
+                {% elif item.aqi <= 150 %}{% set aqi_class = "aqi-category-101-150" %}
+                {% elif item.aqi <= 200 %}{% set aqi_class = "aqi-category-151-200" %}
+                {% elif item.aqi <= 300 %}{% set aqi_class = "aqi-category-201-300" %}
+                {% else %}{% set aqi_class = "aqi-category-301-up" %}{% endif %}
+
+                <li class="aqi-item {{ aqi_class }}">
+                    <strong>時間:</strong> {{ item.time }} <br>
+                    <strong>AQI:</strong> <span>{{ item.aqi }}</span>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p style="text-align: center; color: red;">⚠️ 無法獲取或計算未來 AQI 預測數據。</p>
+    {% endif %}
+
+</div>
+
+</body>
+</html>
