@@ -130,6 +130,8 @@
     </div>
 
     <script>
+        // 移除 Chart.register(ChartZoom);
+
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -280,7 +282,7 @@
                     scales: {
                         y: {
                             beginAtZero: true,
-                            // 移除 min, max, suggestedMax，讓 Y 軸根據數據自動調整
+                            // 保持預設，讓 Chart.js 根據數據自動調整 Y 軸範圍
                             grid: {
                                 color: 'rgba(0, 0, 0, 0.05)'
                             },
