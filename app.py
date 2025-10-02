@@ -1,4 +1,4 @@
-# app.py: Air Quality Prediction Flask Application
+# app.py: Air Quality Prediction Flask Application - Refactored for Render Stability
 
 # =================================================================
 # 導入所有必要的庫
@@ -21,7 +21,16 @@ from flask import Flask, render_template
 warnings.filterwarnings('ignore')
 
 # =================================================================
-# 常數設定 (與您的原始腳本相同)
+# 全域變數 - 僅在應用程式啟動時設定一次
+# =================================================================
+TRAINED_MODELS = {} 
+LAST_OBSERVATION = None 
+FEATURE_COLUMNS = []
+POLLUTANT_PARAMS = [] # 實際找到並訓練的模型參數
+HOURS_TO_PREDICT = 24
+
+# =================================================================
+# 常數設定
 # =================================================================
 API_KEY = "68af34aea77a19aa1137ee5fd9b287229ccf23a686309b4521924a04963ac663"
 API_BASE_URL = "https://api.openaq.org/v3/"
@@ -30,7 +39,7 @@ LOCAL_TZ = "Asia/Taipei"
 MIN_DATA_THRESHOLD = 100
 LAG_HOURS = [1, 2, 3, 6, 12, 24]
 ROLLING_WINDOWS = [6, 12, 24]
-DAYS_TO_FETCH = 14 # 減少抓取天數以加速 Web 應用啟動時間
+DAYS_TO_FETCH = 7 # 為了加速啟動，我們將天數減少到 7 天
 
 # 簡化的 AQI 分級表 (基於小時值和 US EPA 標準的常用數值)
 AQI_BREAKPOINTS = {
@@ -43,7 +52,7 @@ AQI_BREAKPOINTS = {
 }
 
 # =================================================================
-# 輔助函式: AQI 計算 (從您的原始腳本複製)
+# 輔助函式: AQI 計算 (保持不變)
 # =================================================================
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
@@ -88,7 +97,7 @@ def calculate_aqi(row: pd.Series, params: list) -> int:
     return int(np.max(sub_indices))
 
 # =================================================================
-# OpenAQ V3 數據爬取/輔助函式 (從您的原始腳本複製)
+# OpenAQ V3 數據爬取/輔助函式 (保持不變)
 # =================================================================
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/:"*?<>|]+', '_', name)
@@ -222,6 +231,7 @@ def get_all_target_data(station_id, target_params, days_to_fetch):
     for param in target_params:
         sensor_id = sensor_map.get(param)
         if sensor_id:
+            # 由於 OpenAQ v3 API 的限制，每次呼叫最多只能取 500 筆資料
             df_param = fetch_sensor_data(sensor_id, param, days=days_to_fetch)
             if not df_param.empty:
                 df_param.rename(columns={param: f'{param}_value'}, inplace=True)
@@ -239,7 +249,7 @@ def get_all_target_data(station_id, target_params, days_to_fetch):
 
 
 # =================================================================
-# Meteostat 天氣爬蟲類 (從您的原始腳本複製)
+# Meteostat 天氣爬蟲類 (保持不變)
 # =================================================================
 class WeatherCrawler:
     """Meteostat 小時級天氣數據爬蟲與整合"""
@@ -263,20 +273,23 @@ class WeatherCrawler:
         start_time_utc_aware = air_quality_df['datetime'].min()
         end_time_utc_aware = air_quality_df['datetime'].max()
 
+        # Meteostat 期望無時區的 datetime 物件
         start_dt = start_time_utc_aware.tz_convert(None).to_pydatetime()
         end_dt = end_time_utc_aware.tz_convert(None).to_pydatetime()
 
         try:
+            # 這是您日誌中出現錯誤的地方之一 (Python 3.13 兼容性問題)
             data = Hourly(self.point, start_dt, end_dt)
             weather_data = data.fetch()
-        except Exception:
+        except Exception as e:
+            print(f"❌ 抓取 Meteostat 數據失敗: {e}")
             weather_data = pd.DataFrame()
 
         if weather_data.empty:
             # 如果抓取失敗，則填充 NaN
             empty_weather = pd.DataFrame({'datetime': air_quality_df['datetime'].unique()})
             for col in self.weather_cols.values():
-                 empty_weather[col] = np.nan
+                empty_weather[col] = np.nan
             return pd.merge(air_quality_df, empty_weather, on='datetime', how='left')
 
         weather_data = weather_data.reset_index()
@@ -303,7 +316,7 @@ class WeatherCrawler:
 
 
 # =================================================================
-# 預測函式 (從您的原始腳本複製)
+# 預測函式 (保持不變)
 # =================================================================
 
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
@@ -311,7 +324,8 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     predictions = []
 
     last_datetime_aware = last_data['datetime'].iloc[0]
-    current_data_dict = last_data[feature_cols].iloc[0].to_dict()
+    # 注意：這裡使用 to_dict() 創建一個可變字典副本作為迭代的基礎
+    current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
@@ -325,20 +339,24 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         pred_features['hour'] = future_time.hour
         pred_features['day_of_week'] = future_time.dayofweek
         pred_features['month'] = future_time.month
-        pred_features['day_of_year'] = future_time.dayofyear
+        pred_features['day_of_year'] = future_time.timetuple().tm_yday # 使用 day_of_year
         pred_features['is_weekend'] = int(future_time.dayofweek in [5, 6])
         pred_features['hour_sin'] = np.sin(2 * np.pi * future_time.hour / 24)
         pred_features['hour_cos'] = np.cos(2 * np.pi * future_time.hour / 24)
-        pred_features['day_sin'] = np.sin(2 * np.pi * future_time.dayofyear / 365)
-        pred_features['day_cos'] = np.cos(2 * np.pi * future_time.dayofyear / 365)
+        pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
+        pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-        # 2. 模擬未來天氣變化
+        # 2. 模擬未來天氣變化 (使用前一小時的天氣值進行隨機擾動)
         if has_weather:
             np.random.seed(future_time.hour + future_time.day + 42)
             for w_col in weather_feature_names:
-                base_value = current_data_dict[w_col]
-                pred_features[w_col] = base_value + np.random.normal(0, 0.5)
-                current_data_dict[w_col] = pred_features[w_col]
+                base_value = current_data_dict.get(w_col)
+                if base_value is not None and not np.isnan(base_value):
+                    # 模擬輕微隨機變化
+                    new_weather_value = base_value + np.random.normal(0, 0.5) 
+                    pred_features[w_col] = new_weather_value
+                    # 將新的天氣值更新到 current_data_dict，以便下一小時使用
+                    current_data_dict[w_col] = new_weather_value
 
         current_prediction_row = {'datetime': future_time}
         new_pollutant_values = {}
@@ -346,9 +364,10 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 3. 預測所有污染物
         for param in pollutant_params:
             model = models[param]
+            # 確保輸入特徵的順序與模型訓練時一致
             pred_input = np.array([pred_features[col] for col in feature_cols]).reshape(1, -1)
             pred = model.predict(pred_input)[0]
-            pred = max(0, pred)
+            pred = max(0, pred) # 濃度不能小於 0
 
             current_prediction_row[f'{param}_pred'] = pred
             new_pollutant_values[param] = pred
@@ -360,8 +379,9 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
         predictions.append(current_prediction_row)
 
-        # 5. 更新滯後特徵
+        # 5. 更新滯後特徵 (用當前預測值填充 Lag_1h，並將其他 Lag 向後移動)
         for param in pollutant_params + ['aqi']:
+            # 從最大的 Lag 開始更新，避免覆蓋
             for i in range(len(LAG_HOURS) - 1, 0, -1):
                 lag_current = LAG_HOURS[i]
                 lag_prev = LAG_HOURS[i-1]
@@ -371,168 +391,195 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 if lag_current_col in current_data_dict and lag_prev_col in current_data_dict:
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
-            if f'{param}_lag_1h' in current_data_dict:
+            # 更新 1 小時滯後特徵為當前預測值
+            if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                 current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
 
+        # 6. 更新滾動平均/標準差特徵 (這需要更複雜的邏輯，為了簡化並保持快速響應，我們在此省略更新滾動特徵，讓模型主要依賴滯後特徵)
+        # 由於滾動特徵更新涉及儲存過去整個窗口的數據，為了在每次請求中保持狀態簡潔，我們專注於滯後特徵。
+        
     return pd.DataFrame(predictions)
 
 
 # =================================================================
-# 核心執行邏輯 (封裝您的步驟 3-6)
+# 應用程式啟動初始化 (只執行一次)
 # =================================================================
 
-def run_aqi_prediction(lat: float, lon: float, days_to_fetch: int, hours_to_predict: int):
-    """執行空氣品質預測的整個流程，並返回預測結果。"""
-
+def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
+    """
+    執行空氣品質預測的整個流程，並將訓練結果儲存到全域變數中。
+    此函數只在 Flask 啟動時執行一次，避免 worker timeout。
+    """
+    global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
+    
     weather = WeatherCrawler(lat, lon)
     
-    # 1. 數據收集
-    station = get_nearest_station(lat, lon, days=days_to_fetch)
+    try:
+        print("🔥 [Init] 開始執行 AQI 預測初始化流程...")
+        
+        # 1. 數據收集
+        station = get_nearest_station(lat, lon, days=days_to_fetch) 
 
-    if not station:
-        # 如果找不到測站，則使用模擬數據
-        df = generate_fake_data(limit=days_to_fetch * 24, params=POLLUTANT_TARGETS)
-        found_target_params = POLLUTANT_TARGETS
-    else:
-        df_raw, found_target_params = get_all_target_data(station["id"], POLLUTANT_TARGETS, days_to_fetch)
-
-        if df_raw.empty or len(df_raw) < MIN_DATA_THRESHOLD:
+        if not station:
+            print("🚨 [Init] 未找到活躍測站，使用模擬數據。")
             df = generate_fake_data(limit=days_to_fetch * 24, params=POLLUTANT_TARGETS)
             found_target_params = POLLUTANT_TARGETS
         else:
-            df = df_raw.copy()
+            print(f"✅ [Init] 找到測站: {station['name']} ({station['id']})")
+            df_raw, found_target_params = get_all_target_data(station["id"], POLLUTANT_TARGETS, days_to_fetch)
+
+            if df_raw.empty or len(df_raw) < MIN_DATA_THRESHOLD:
+                print("🚨 [Init] 實際數據量不足，使用模擬數據。")
+                df = generate_fake_data(limit=days_to_fetch * 24, params=POLLUTANT_TARGETS)
+                found_target_params = POLLUTANT_TARGETS
+            else:
+                df = df_raw.copy()
+            
+            # 合併 Meteostat 天氣數據
+            df = weather.fetch_and_merge_weather(df)
+
+        POLLUTANT_PARAMS = found_target_params
+        weather_feature_names = weather.get_weather_feature_names()
+        value_cols = [f'{p}_value' for p in POLLUTANT_PARAMS]
+        all_data_cols = value_cols + weather_feature_names
+
+        # 重採樣到小時
+        df.set_index('datetime', inplace=True)
+        df = df[value_cols + weather_feature_names].resample('H').mean()
+        df.reset_index(inplace=True)
+        df = df.dropna(how='all', subset=all_data_cols)
         
-        # 合併 Meteostat 天氣數據
-        df = weather.fetch_and_merge_weather(df)
+        # 計算歷史 AQI
+        df['aqi_value'] = df.apply(lambda row: calculate_aqi(row, POLLUTANT_PARAMS), axis=1)
 
-    weather_feature_names = weather.get_weather_feature_names()
-    value_cols = [f'{p}_value' for p in found_target_params]
-    all_data_cols = value_cols + weather_feature_names
-
-    # 重採樣到小時
-    df.set_index('datetime', inplace=True)
-    df = df[value_cols + weather_feature_names].resample('H').mean()
-    df.reset_index(inplace=True)
-    df = df.dropna(how='all', subset=all_data_cols)
-    
-    # 計算歷史 AQI
-    df['aqi_value'] = df.apply(lambda row: calculate_aqi(row, found_target_params), axis=1)
-
-    # 移除任一污染物或天氣數據為 NaN 的行 (確保模型輸入完整)
-    df = df.dropna(subset=all_data_cols + ['aqi_value']).reset_index(drop=True)
-
-    if len(df) <= max(LAG_HOURS):
-        raise ValueError("最終數據量不足，無法進行滯後特徵工程和訓練。")
+        # 移除任一污染物或天氣數據為 NaN 的行 (確保模型輸入完整)
+        df = df.dropna(subset=all_data_cols + ['aqi_value']).reset_index(drop=True)
+        print(f"📊 [Init] 最終用於訓練的數據量: {len(df)} 小時")
 
 
-    # 2. 特徵工程
-    df['hour'] = df['datetime'].dt.hour
-    df['day_of_week'] = df['datetime'].dt.dayofweek
-    df['month'] = df['datetime'].dt.month
-    df['day_of_year'] = df['datetime'].dt.dayofyear
-    df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-    df['day_sin'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
-    df['day_cos'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
+        if len(df) <= max(LAG_HOURS):
+            raise ValueError(f"最終數據量 ({len(df)}) 不足 {max(LAG_HOURS)}，無法進行滯後特徵工程和訓練。")
 
-    df = df.sort_values('datetime')
-    feature_base_cols = value_cols + ['aqi_value']
 
-    for col_name in feature_base_cols:
-        param = col_name.replace('_value', '')
-        for lag in LAG_HOURS:
-            df[f'{param}_lag_{lag}h'] = df[col_name].shift(lag)
+        # 2. 特徵工程
+        df['hour'] = df['datetime'].dt.hour
+        df['day_of_week'] = df['datetime'].dt.dayofweek
+        df['month'] = df['datetime'].dt.month
+        df['day_of_year'] = df['datetime'].dt.dayofyear
+        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['day_sin'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
+        df['day_cos'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
+
+        df = df.sort_values('datetime')
+        feature_base_cols = value_cols + ['aqi_value']
+
+        for col_name in feature_base_cols:
+            param = col_name.replace('_value', '')
+            for lag in LAG_HOURS:
+                df[f'{param}_lag_{lag}h'] = df[col_name].shift(lag)
+            
+            if 'aqi' not in param:
+                for window in ROLLING_WINDOWS:
+                    df[f'{param}_rolling_mean_{window}h'] = df[col_name].rolling(window=window, min_periods=1).mean()
+                    df[f'{param}_rolling_std_{window}h'] = df[col_name].rolling(window=window, min_periods=1).std()
         
-        if 'aqi' not in param:
-            for window in ROLLING_WINDOWS:
-                df[f'{param}_rolling_mean_{window}h'] = df[col_name].rolling(window=window, min_periods=1).mean()
-                df[f'{param}_rolling_std_{window}h'] = df[col_name].rolling(window=window, min_periods=1).std()
-    
-    df = df.dropna().reset_index(drop=True)
+        df = df.dropna().reset_index(drop=True)
 
-    base_time_features = ['hour', 'day_of_week', 'month', 'is_weekend', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
-    
-    air_quality_features = []
-    for param in found_target_params + ['aqi']:
-        for lag in LAG_HOURS:
-            air_quality_features.append(f'{param}_lag_{lag}h')
-        if param != 'aqi':
-            for window in ROLLING_WINDOWS:
-                air_quality_features.append(f'{param}_rolling_mean_{window}h')
-                air_quality_features.append(f'{param}_rolling_std_{window}h')
+        # 儲存最後一筆數據，用於未來預測的起點
+        LAST_OBSERVATION = df.iloc[-1:].copy() 
 
-    feature_cols = weather_feature_names + base_time_features + air_quality_features
-    feature_cols = [col for col in feature_cols if col in df.columns]
+        base_time_features = ['hour', 'day_of_week', 'month', 'is_weekend', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+        
+        air_quality_features = []
+        for param in POLLUTANT_PARAMS + ['aqi']:
+            for lag in LAG_HOURS:
+                air_quality_features.append(f'{param}_lag_{lag}h')
+            if param != 'aqi':
+                for window in ROLLING_WINDOWS:
+                    air_quality_features.append(f'{param}_rolling_mean_{window}h')
+                    air_quality_features.append(f'{param}_rolling_std_{window}h')
 
-    # 3. 數據分割與模型訓練 (80% 訓練)
-    split_idx = int(len(df) * 0.8)
-    X = df[feature_cols]
-    Y = {param: df[f'{param}_value'] for param in found_target_params}
-    
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    Y_train = {param: Y[param][:split_idx] for param in found_target_params}
+        FEATURE_COLUMNS = weather_feature_names + base_time_features + air_quality_features
+        FEATURE_COLUMNS = [col for col in FEATURE_COLUMNS if col in df.columns]
 
-    multi_models = {}
-    for param in found_target_params:
-        xgb_model = xgb.XGBRegressor(
-            n_estimators=150, max_depth=7, learning_rate=0.08, random_state=42, n_jobs=-1
-        )
-        xgb_model.fit(X_train, Y_train[param])
-        multi_models[param] = xgb_model
+        # 3. 數據分割與模型訓練 (80% 訓練)
+        split_idx = int(len(df) * 0.8)
+        X = df[FEATURE_COLUMNS]
+        Y = {param: df[f'{param}_value'] for param in POLLUTANT_PARAMS}
+        
+        X_train = X[:split_idx]
+        Y_train = {param: Y[param][:split_idx] for param in POLLUTANT_PARAMS}
 
-    # 4. 預測未來
-    last_observation = df.iloc[-1:].copy()
-    future_predictions = predict_future_multi(
-        multi_models,
-        last_observation,
-        feature_cols,
-        found_target_params,
-        hours=hours_to_predict
-    )
+        print(f"⏳ [Init] 開始訓練 {len(POLLUTANT_PARAMS)} 個 XGBoost 模型...")
+        for param in POLLUTANT_PARAMS:
+            xgb_model = xgb.XGBRegressor(
+                n_estimators=150, max_depth=7, learning_rate=0.08, random_state=42, n_jobs=-1
+            )
+            # 這是之前超時的地方，現在只在應用啟動時執行一次
+            xgb_model.fit(X_train, Y_train[param]) 
+            TRAINED_MODELS[param] = xgb_model
+        print("✅ [Init] 模型訓練完成，應用程式準備就緒。")
 
-    # 5. 格式化結果
-    future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+    except Exception as e:
+        print(f"❌ [Init] 初始化執行失敗，將使用預設空值: {e}") 
+        TRAINED_MODELS = {} 
+        LAST_OBSERVATION = None
+        FEATURE_COLUMNS = []
+        POLLUTANT_PARAMS = []
 
-    # 提取最高 AQI (必須轉為 int)
-    max_aqi = int(future_predictions['aqi_pred'].max())
-
-    # 提取未來 24 小時的 AQI 列表
-    aqi_list = [
-        {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': int(item['aqi_pred'])}
-        for item in future_predictions.to_dict(orient='records')
-    ]
-
-    return max_aqi, aqi_list
+# 移除舊的 run_aqi_prediction 函數，因為它的邏輯已經被分割。
 
 # =================================================================
-# Flask 應用程式設定
+# Flask 應用程式設定與啟動
 # =================================================================
 app = Flask(__name__)
 
+# 應用程式啟動時，立即執行初始化 (在 gunicorn 啟動時執行一次)
+with app.app_context():
+    # 高雄市中心經緯度
+    LAT, LON = 22.6273, 120.3014
+    # 在此呼叫一次耗時的初始化函式
+    initialize_app_data(LAT, LON, DAYS_TO_FETCH) 
+
 @app.route('/')
 def index():
-    # 高雄市中心經緯度
-    lat, lon = 22.6273, 120.3014
     city_name = "高雄"
     
-    try:
-        # 執行核心預測邏輯 (預測未來 24 小時)
-        max_aqi, aqi_predictions = run_aqi_prediction(lat, lon, DAYS_TO_FETCH, 24)
-    except ValueError as ve:
-        # 處理數據不足的錯誤
+    # 檢查模型是否成功載入
+    if TRAINED_MODELS and LAST_OBSERVATION is not None:
+        try:
+            # 僅執行快速的預測邏輯 (predict_future_multi)
+            future_predictions = predict_future_multi(
+                TRAINED_MODELS,
+                LAST_OBSERVATION,
+                FEATURE_COLUMNS,
+                POLLUTANT_PARAMS,
+                hours=HOURS_TO_PREDICT
+            )
+
+            # 格式化結果
+            future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+            max_aqi = int(future_predictions['aqi_pred'].max())
+
+            aqi_predictions = [
+                {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': int(item['aqi_pred'])}
+                for item in future_predictions.to_dict(orient='records')
+            ]
+            
+        except Exception as e:
+            max_aqi = "N/A"
+            aqi_predictions = []
+            print(f"❌ [Request] 預測執行失敗: {e}") 
+    else:
         max_aqi = "N/A"
         aqi_predictions = []
-        print(f"數據錯誤: {ve}")
-    except Exception as e:
-        # 處理其他網路或計算錯誤
-        max_aqi = "N/A"
-        aqi_predictions = []
-        print(f"預測執行失敗: {e}") 
-        
-    # 渲染 index.html 模板並傳遞數據
+        print("🚨 [Request] 模型或數據尚未初始化，無法進行預測。")
+
     return render_template('index.html', max_aqi=max_aqi, aqi_predictions=aqi_predictions, city_name=city_name)
 
 if __name__ == '__main__':
     # 在本地環境運行時使用
+    # 注意：本地運行可能仍需較長時間等待初始化完成
     app.run(debug=True)
