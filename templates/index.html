@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ city_name }} AQI 預測</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
@@ -71,7 +72,7 @@
             </div>
         </div>
 
-        <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
+                <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">
                 AQI 趨勢圖
             </h3>
@@ -86,18 +87,22 @@
     </div> 
     
     <script>
-        // --- 1. 數據變數安全傳輸與解析 ---
+        // --- 1. 數據變數安全傳輸與解析 (避免空白畫面的關鍵) ---
         let predictions = [];
         try {
-            // 使用 | tojson | safe 確保數據是有效的 JSON 字符串，並安全解析
+            // 從 Jinja2 獲取數據，並安全地解析 JSON
             const aqi_predictions_json = '{{ aqi_predictions | tojson | safe }}';
-            predictions = JSON.parse(aqi_predictions_json);
+            // 檢查是否為空字串或 null 字串，若不是則解析
+            if (aqi_predictions_json && aqi_predictions_json !== 'null') {
+                predictions = JSON.parse(aqi_predictions_json);
+            }
         } catch (e) {
-            console.error("無法解析 AQI 預測數據:", e); 
-            // 如果解析失敗，predictions 仍為空陣列，圖表將不會繪製
+            console.error("無法解析 AQI 預測數據，請檢查 Python 後端傳輸的數據格式:", e); 
+            // 捕獲錯誤，讓程式碼繼續執行，確保其他元素(如最大AQI卡片)能正常顯示
         }
-        // ------------------------------------------
+        // ------------------------------------------------------------------
         
+        // 輔助函數：獲取顏色 CSS 類別
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -107,22 +112,23 @@
             return 'aqi-300';
         }
 
+        // 輔助函數：獲取線條顏色 (HEX)
         function getAqiColor(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return '#9CA3AF';
-            if (aqi <= 50) return '#10B981';
-            if (aqi <= 100) return '#EAB308';
-            if (aqi <= 150) return '#F97316';
-            if (aqi <= 200) return '#DC2626';
-            return '#7C3AED';
+            if (aqi <= 50) return '#10B981'; // 綠
+            if (aqi <= 100) return '#EAB308'; // 黃
+            if (aqi <= 150) return '#F97316'; // 橘
+            if (aqi <= 200) return '#DC2626'; // 紅
+            return '#7C3AED'; // 紫
         }
         
+        // 步驟 2：更新頂部卡片的顏色
         function updateAqiColors() {
             const maxAqiValue = document.getElementById('maxAqiValue').innerText.trim();
             const aqiStatusElement = document.getElementById('aqiStatus');
             
             const parsedAqi = parseInt(maxAqiValue);
 
-            // 移除所有顏色類別以避免衝突
             ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'].forEach(c => {
                 aqiStatusElement.classList.remove(c);
             });
@@ -136,14 +142,13 @@
             }
         }
 
+        // 步驟 3：繪製 AQI 趨勢圖
         function createAqiChart() {
-            // 使用 try-catch 確保解析後的 predictions 
             if (!predictions || predictions.length === 0) {
-                // 如果數據為空，則不在控制台報錯，保持頁面乾淨
                 return;
             }
 
-            // X 軸標籤顯示為 MM-DD HH:MM
+            // 準備圖表數據
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); 
                 const date = parts[0].substring(5); 
@@ -153,7 +158,6 @@
 
             const data = predictions.map(p => {
                 const aqi = p.aqi;
-                // 確保數值是整數或 null
                 return (aqi === "N/A" || isNaN(aqi) || aqi === null) ? null : parseInt(aqi);
             });
 
@@ -189,6 +193,7 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    // 配置 Chart.js Zoom 插件
                     plugins: {
                         legend: { display: false },
                         tooltip: {
@@ -204,41 +209,47 @@
                                     return `AQI: ${aqi} (${status})`;
                                 }
                             }
-                        }
+                        },
+                        zoom: {
+                            pan: {
+                                enabled: true, // 啟用平移
+                                mode: 'x', // 允許 X 軸平移
+                            },
+                            zoom: {
+                                wheel: {
+                                    enabled: true, // 啟用滾輪縮放
+                                    modifierKey: 'alt', // 按住 Alt/Option 鍵時才縮放
+                                },
+                                mode: 'y', // 只允許 Y 軸縮放 (這是圖 2/4 的效果)
+                            },
+                            limits: {
+                                y: { min: 0, max: 500 } // 限制 Y 軸最小最大值
+                            }
+                        }
                     },
                     scales: {
                         y: {
                             beginAtZero: true,
-                            max: 500,
+                            max: 500, // 與圖 2/4 的 Y 軸最大值一致
                             grid: { color: 'rgba(0, 0, 0, 0.05)' },
-                            ticks: { font: { size: 12 } },
-                            title: {
-                                display: true,
-                                text: 'AQI 數值',
-                                font: { size: 14, weight: 'bold' }
-                            }
+                            title: { display: true, text: 'AQI 數值', font: { size: 14, weight: 'bold' } }
                         },
                         x: {
                             grid: { display: false },
-                            ticks: {
-                                font: { size: 11 },
+                            title: { display: true, text: '時間', font: { size: 14, weight: 'bold' } },
+                            ticks: {
                                 maxRotation: 45,
                                 minRotation: 45,
-                                callback: function(value, index, values) {
-                                    const fullLabel = this.getLabelForValue(value);
-                                    const parts = fullLabel.split(' '); 
-                                    
-                                    if (index % 6 === 0) { 
-                                        return fullLabel; // 每 6 小時顯示完整日期+時間
-                                    }
-                                    return parts[1];  // 否則只顯示時間
-                                }
-                            },
-                            title: {
-                                display: true,
-                                text: '時間',
-                                font: { size: 14, weight: 'bold' }
-                            }
+                                callback: function(value, index) {
+                                    const fullLabel = this.getLabelForValue(value);
+                                    const parts = fullLabel.split(' ');
+                                    // 判斷是否為午夜 (例如 00:00) 或每 6 個點才顯示日期
+                                    if (index % 6 === 0 || parts[1] === '00:00') {
+                                        return fullLabel; 
+                                    }
+                                    return parts[1];
+                                }
+                            }
                         }
                     }
                 }
@@ -248,6 +259,16 @@
         window.onload = function() {
             updateAqiColors();
             createAqiChart();
+            // 在圖表下方提示用戶如何重設縮放
+            const aqiChartElement = document.getElementById('aqiChart');
+            if (aqiChartElement) {
+                aqiChartElement.addEventListener('dblclick', function() {
+                    const chart = Chart.getChart(aqiChartElement);
+                    if (chart && chart.resetZoom) {
+                        chart.resetZoom();
+                    }
+                });
+            }
         };
     </script>
 </body>
