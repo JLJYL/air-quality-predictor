@@ -101,19 +101,16 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
 
         df = pd.json_normalize(results)
 
-        # 參數名與單位
         df["parameter"] = df["parameter.name"].str.lower() if "parameter.name" in df.columns else df.get("parameter", df.get("name"))
         df["units"] = df["parameter.units"] if "parameter.units" in df.columns else df.get("units")
         df["value"] = df["value"]
 
-        # 取代表該筆的UTC時間
         df["ts_utc"] = pd.NaT
         for col in ["datetime.utc", "period.datetimeTo.utc", "period.datetimeFrom.utc"]:
             if col in df.columns:
                 ts = pd.to_datetime(df[col], errors="coerce", utc=True)
                 df["ts_utc"] = df["ts_utc"].where(df["ts_utc"].notna(), ts)
 
-        # 地方時間
         local_col = None
         for c in ["datetime.local", "period.datetimeTo.local", "period.datetimeFrom.local"]:
             if c in df.columns:
@@ -147,12 +144,10 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
                 continue
             df = pd.json_normalize(res)
 
-            # 參數名與單位
             df["parameter"] = p
             df["units"] = df["parameter.units"] if "parameter.units" in df.columns else df.get("units")
             df["value"] = df["value"]
 
-            # 時間欄位
             df["ts_utc"] = pd.NaT
             for col in ["datetime.utc", "period.datetimeTo.utc", "period.datetimeFrom.utc"]:
                 if col in df.columns:
@@ -213,7 +208,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     if df_loc_latest.empty:
         return pd.DataFrame()
 
-    # 決定對齊時間 t_star
     t_star_latest = df_loc_latest["ts_utc"].max()
     t_star_loc = meta["last_utc"]
     t_star = t_star_latest if pd.notna(t_star_latest) else t_star_loc
@@ -221,14 +215,12 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     if pd.isna(t_star):
         return pd.DataFrame()
     
-    # 1. 在 /locations/{id}/latest 中找「接近 t_star」的一批
     df_at_batch = pick_batch_near(df_loc_latest, t_star, TOL_MINUTES_PRIMARY)
     if df_at_batch.empty:
         df_at_batch = pick_batch_near(df_loc_latest, t_star, TOL_MINUTES_FALLBACK)
 
     have = set(df_at_batch["parameter"].str.lower().tolist()) if not df_at_batch.empty else set()
 
-    # 2. 還缺的參數，用 /parameters/{pid}/latest?locationId= 補
     missing = [p for p in target_params if p not in have]
     df_param_batch = pd.DataFrame()
     if missing:
@@ -237,7 +229,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
         if df_param_batch.empty:
             df_param_batch = pick_batch_near(df_param_latest, t_star, TOL_MINUTES_FALLBACK)
 
-    # 3. 合併、只留目標參數、去重
     frames = [df for df in [df_at_batch, df_param_batch] if not df.empty]
     if not frames:
         return pd.DataFrame()
@@ -246,7 +237,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     df_all["parameter"] = df_all["parameter"].str.lower()
     df_all = df_all[df_all["parameter"].isin(target_params)]
 
-    # 最終去重 (取最接近 t_star 的那筆)
     df_all["dt_diff"] = (df_all["ts_utc"] - t_star).abs()
     df_all = df_all.sort_values(["parameter", "dt_diff", "ts_utc"], ascending=[True, True, False])
     df_all = df_all.drop_duplicates(subset=["parameter"], keep="first")
@@ -264,15 +254,10 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
             lambda row: calculate_aqi(row, target_params, is_pred=False), axis=1
         )
         
-    # 修正：由於 ts_utc 已經是 UTC-aware，這裡不需要再進行任何時區本地化操作。
-    # 只需要確保它最終被正確地轉換成 Pandas Datetime 類型。
     if not observation.empty:
-        # 將時間轉換為 Datetime 類型
         observation['datetime'] = pd.to_datetime(observation['datetime'])
-        # 如果時間是 naive (無時區資訊)，則設定為 UTC
         if observation['datetime'].dt.tz is None:
              observation['datetime'] = observation['datetime'].dt.tz_localize('UTC')
-
 
     return observation
 
@@ -327,32 +312,15 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> int:
 # 預測函式
 # =================================================================
 
-# 替換成這個版本：
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # 🚨 強健修正：先移除所有時區資訊 (tz_localize(None))，
-    #    然後再將其明確地設定為 UTC (tz_localize('UTC'))。
-    #    這能確保不論數據的原始狀態為何，都能安全地轉換為 UTC-aware。
-    last_data['datetime'] = pd.to_datetime(last_data['datetime'])
-    
-    try:
-        # 1. 嘗試移除時區（如果它是 tz-aware）
-        if last_data['datetime'].dt.tz is not None:
-             last_data['datetime'] = last_data['datetime'].dt.tz_localize(None)
-    except Exception:
-        # 忽略移除時區時的潛在錯誤，讓它保持 Naive
-        pass 
-        
-    # 2. 將其本地化（設定）為 UTC
-    last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+    # 🚨 修正：現在我們信任 index() 傳入的時間是 Naive 的，因此可以直接本地化為 UTC
+    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
          
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    # ... 後續程式碼不變 ...
-    
-    # 創建可變字典副本作為迭代的基礎，必須包含所有 feature_cols
     current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
@@ -433,18 +401,15 @@ def load_models_and_metadata():
         return
 
     try:
-        # 1. 載入元數據
         with open(META_PATH, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
 
         POLLUTANT_PARAMS = metadata.get('pollutant_params', [])
         FEATURE_COLUMNS = metadata.get('feature_columns', [])
         
-        # 載入最後一筆數據，包含完整的滯後和滾動特徵
         if 'last_observation_json' in metadata:
             LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
 
-        # 2. 載入 XGBoost 模型
         TRAINED_MODELS = {}
         params_to_remove = []
         for param in POLLUTANT_PARAMS:
@@ -490,7 +455,7 @@ def index():
         print("🚨 [Request] 模型或參數尚未初始化，無法進行預測。")
         return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
     
-    # 1. 嘗試即時抓取最新觀測數據 (只包含 datetime, co, pm25, aqi 等當前值)
+    # 1. 嘗試即時抓取最新觀測數據
     current_observation_raw = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
 
     observation_for_prediction = None
@@ -500,18 +465,13 @@ def index():
         print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，退回使用模型載入時的數據。")
         observation_for_prediction = LAST_OBSERVATION
     else:
-        # 複製 LAST_OBSERVATION 的結構，以便包含所有滯後特徵列
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
 
-        # 將「當前值」替換成 API 抓到的最新數據
         latest_row = current_observation_raw.iloc[0]
 
-        # 替換時間
         observation_for_prediction['datetime'] = latest_row['datetime']
         
-        # 替換當前小時污染物值和 AQI (以及可能的天氣值，如果模型有用到)
         for col in latest_row.index:
-            # 只替換當前原始值 (非滯後、非滾動平均)
             if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
                  if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
                     observation_for_prediction[col] = latest_row[col]
@@ -522,18 +482,29 @@ def index():
     if observation_for_prediction is None or observation_for_prediction.empty:
         print("🚨 [Request] 最終預測數據來源為空，無法進行預測。")
         return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
-
+    
+    # 🚨 最終修正：在傳入預測函式前，強制移除所有時區資訊，避免重複本地化錯誤
+    try:
+        # 確保是 datetime 類型
+        observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
+        # 移除時區資訊
+        if observation_for_prediction['datetime'].dt.tz is not None:
+             observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None)
+        print("✅ [Fix] 已安全清除預測數據中的時區資訊。")
+    except Exception as e:
+        # 如果失敗，記錄錯誤但仍然嘗試繼續預測
+        print(f"⚠️ [Fix] 清除時區資訊失敗: {e}")
+    
     # 4. 進行預測
     try:
         future_predictions = predict_future_multi(
             TRAINED_MODELS,
-            observation_for_prediction, # 使用整合了新值的數據
+            observation_for_prediction, # 傳入 Naive 時間的數據
             FEATURE_COLUMNS,
             POLLUTANT_PARAMS,
             hours=HOURS_TO_PREDICT
         )
 
-        # 格式化結果
         future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
         max_aqi = int(future_predictions['aqi_pred'].max())
 
@@ -550,5 +521,4 @@ def index():
     return render_template('index.html', max_aqi=max_aqi, aqi_predictions=aqi_predictions, city_name=city_name)
 
 if __name__ == '__main__':
-    # 在本地環境運行時使用
     app.run(debug=True)
