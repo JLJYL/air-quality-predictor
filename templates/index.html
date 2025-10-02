@@ -122,33 +122,63 @@
                 const aqi = p.aqi;
                 return (aqi === "N/A" || isNaN(aqi) || aqi === null) ? null : parseInt(aqi);
             });
+            
+            // 新增：處理觀測值與預測值的資料集
+            let datasets = [];
+            const isFallback = predictions.length === 1 && predictions[0].is_obs;
 
-            const borderColors = data.map(aqi => getAqiColor(aqi));
+            if (isFallback) {
+                // 回退模式：只顯示一個觀測點
+                datasets.push({
+                    label: '最新觀測 AQI',
+                    data: data,
+                    borderColor: '#9CA3AF',
+                    backgroundColor: 'rgba(156, 163, 175, 0.5)',
+                    borderWidth: 5,
+                    pointRadius: 8,
+                    pointBackgroundColor: getAqiColor(data[0]),
+                    pointBorderColor: '#fff',
+                    type: 'bubble' // 使用氣泡圖標記觀測點
+                });
+            } else {
+                // 預測模式：線圖
+                const borderColors = data.map(aqi => getAqiColor(aqi));
+                datasets.push({
+                    label: '預測 AQI 數值',
+                    data: data,
+                    borderColor: '#3B82F6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 5,
+                    pointBackgroundColor: borderColors,
+                    pointBorderColor: '#fff',
+                });
+            }
+
             const ctx = document.getElementById('aqiChart').getContext('2d');
             
             new Chart(ctx, {
-                type: 'line',
+                type: 'line', // 即使回退模式也使用 line 來保持 x 軸標籤一致
                 data: {
                     labels: labels,
-                    datasets: [{
-                        label: 'AQI 數值',
-                        data: data,
-                        borderColor: '#3B82F6',
-                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                        borderWidth: 3,
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 5,
-                        pointBackgroundColor: borderColors,
-                        pointBorderColor: '#fff',
-                    }]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        y: { beginAtZero: true, max: 500 },
+                        y: { 
+                            beginAtZero: true, 
+                            max: 200, // 設一個較保守的上限
+                            ticks: {
+                                callback: function(value) {
+                                    return (value <= 200) ? value : null; // 超過 200 不顯示刻度
+                                }
+                            }
+                        },
                         x: { 
                             ticks: {
                                 maxRotation: 45, minRotation: 45,
@@ -157,6 +187,26 @@
                                     const parts = fullLabel.split(' ');
                                     return (index % 6 === 0) ? fullLabel : parts[1]; 
                                 }
+                            }
+                        }
+                    },
+                    // 新增 Tooltip 回呼函式以顯示是否為觀測值
+                    tooltips: {
+                        callbacks: {
+                            title: function(tooltipItems, data) {
+                                const index = tooltipItems[0].dataIndex;
+                                if (predictions[index] && predictions[index].is_obs) {
+                                    return '【最新觀測】';
+                                }
+                                return '預測';
+                            },
+                            label: function(tooltipItem, data) {
+                                let label = data.datasets[tooltipItem.datasetIndex].label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                label += tooltipItem.yLabel;
+                                return label;
                             }
                         }
                     }
