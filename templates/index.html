@@ -88,10 +88,11 @@
 
     <!-- JavaScript for Chart Drawing and UI Updates (圖表繪製和 UI 更新的 JavaScript) -->
     <script>
-        // 使用 | tojson 過濾器，確保變數以正確的 JavaScript 字面量形式插入
-        const aqiPredictions = {{ aqi_predictions | tojson }};
-        const maxAqiValue = {{ max_aqi | tojson }}; 
-        const isFallback = {{ is_fallback | tojson }};
+        // 修正：使用 default 確保變數存在，並使用 safe 確保 JSON 內容被正確插入，防止 { 符號錯誤。
+        // 最終防禦性修正：使用 JSON.parse 將 Jinja 輸出包裹在字串中，避免模板渲染導致的語法錯誤。
+        const aqiPredictions = JSON.parse('{{ aqi_predictions | default([], true) | tojson | safe }}');
+        const maxAqiValue = JSON.parse('{{ max_aqi | default("N/A", true) | tojson | safe }}'); 
+        const isFallback = JSON.parse('{{ is_fallback | default(false, true) | tojson | safe }}');
 
         /**
          * 根據 AQI 值獲取對應的顏色和描述
@@ -106,7 +107,7 @@
             if (aqi <= 50) return { color: '#00e400', status: '良好', tailwindClass: 'aqi-good' };
             if (aqi <= 100) return { color: '#ff9900', status: '普通', tailwindClass: 'aqi-moderate' };
             if (aqi <= 150) return { color: '#ff0000', status: '對敏感族群不健康', tailwindClass: 'aqi-unhealthy-sensitive' };
-            if (aqi <= 200) return { color: '#8f3f97', status: '不健康', tailwinqdClass: 'aqi-unhealthy' };
+            if (aqi <= 200) return { color: '#8f3f97', color: 'white', status: '不健康', tailwinqdClass: 'aqi-unhealthy' };
             return { color: '#7e0023', status: '非常不健康', tailwindClass: 'aqi-very-unhealthy' };
         }
 
