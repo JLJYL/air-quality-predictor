@@ -1,4 +1,4 @@
-# app.py - 修正版本 (請替換掉您所有的 app.py 內容)
+# app.py - 最終修正版本
 
 # =================================================================
 # 導入所有必要的庫 
@@ -42,20 +42,24 @@ TOL_MINUTES_FALLBACK = 60
 # 全域變數
 # =================================================================
 TRAINED_MODELS = {} 
-LAST_OBSERVATION = None # 從 model_meta.json 載入，用於提供滯後特徵的基礎
+LAST_OBSERVATION = None 
 FEATURE_COLUMNS = []
-POLLUTANT_PARAMS = [] # 實際找到並訓練的模型參數
+POLLUTANT_PARAMS = [] 
 HOURS_TO_PREDICT = 24
 
+# 儲存最新的觀測數據 (用於回退)
+CURRENT_OBSERVATION_AQI = "N/A"
+CURRENT_OBSERVATION_TIME = "N/A"
+
 # =================================================================
-# 常數設定
+# 常數設定 (略，與前版本相同)
 # =================================================================
 LOCAL_TZ = "Asia/Taipei"
 LAG_HOURS = [1, 2, 3, 6, 12, 24]
 ROLLING_WINDOWS = [6, 12, 24]
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] 
 
-# 簡化的 AQI 分級表
+# 簡化的 AQI 分級表 (略)
 AQI_BREAKPOINTS = {
     "pm25": [(0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150), (55.5, 150.4, 151, 200)],
     "pm10": [(0, 54, 0, 50), (55, 154, 51, 100), (155, 254, 101, 150), (255, 354, 151, 200)],
@@ -67,8 +71,12 @@ AQI_BREAKPOINTS = {
 
 
 # =================================================================
-# OpenAQ 資料抓取函式
+# OpenAQ 資料抓取函式 (略，與前版本相同)
 # =================================================================
+# ... (這裡省略了所有 OpenAQ 抓取函式，請保持原樣) ...
+# ... (這裡省略了 calculate_aqi 相關函式，請保持原樣) ...
+# ... (這裡省略了 predict_future_multi 函式，請保持原樣) ...
+# ... (這裡省略了 load_models_and_metadata 函式，請保持原樣) ...
 
 def get_location_meta(location_id: int):
     """取得站點最後更新時間"""
@@ -87,7 +95,7 @@ def get_location_meta(location_id: int):
     except Exception as e:
         return None
 
-
+# ... (get_location_latest_df)
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
     """站點各參數的『最新值清單』→ 正規化時間成 ts_utc / ts_local"""
     try:
@@ -122,7 +130,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
     except Exception as e:
         return pd.DataFrame()
 
-
+# ... (get_parameters_latest_df)
 def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
     """用 /parameters/{pid}/latest?locationId= 拿各參數『最新值』並合併"""
     rows = []
@@ -170,7 +178,7 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
 
-
+# ... (pick_batch_near)
 def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> pd.DataFrame:
     """從 DataFrame 中挑選最接近 t_ref 且時間差異在 tol_minutes 內的資料批次"""
     if df.empty or pd.isna(t_ref):
@@ -197,7 +205,7 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
     df = df.drop_duplicates(subset=["parameter"], keep="first")
     return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
 
-
+# ... (fetch_latest_observation_data)
 def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.DataFrame:
     """從 OpenAQ 抓取並轉換成單行寬表（只含當前原始值）"""
     meta = get_location_meta(location_id)
@@ -261,11 +269,7 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
 
     return observation
 
-
-# =================================================================
-# 輔助函式: AQI 計算
-# =================================================================
-
+# ... (calculate_aqi_sub_index)
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     """計算單一污染物濃度對應的 AQI 子指數 (I)"""
     if pd.isna(concentration) or concentration < 0:
@@ -293,6 +297,7 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
 
     return np.nan
 
+# ... (calculate_aqi)
 def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
     """根據多個污染物濃度計算最終 AQI (取最大子指數)"""
     sub_indices = []
@@ -308,11 +313,7 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
     return np.max(sub_indices)
 
-
-# =================================================================
-# 預測函式
-# =================================================================
-
+# ... (predict_future_multi)
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
@@ -321,7 +322,11 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
+    # 🚨 檢查並補齊特徵列，缺失則以 np.nan 填充 (讓 XGBoost 處理)
+    current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
+                         if col in last_data.columns and not last_data[col].empty 
+                         else np.nan 
+                         for col in feature_cols} 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
@@ -331,7 +336,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         future_time = last_datetime_aware + timedelta(hours=h + 1)
         pred_features = current_data_dict.copy()
 
-        # 1. 更新時間特徵
+        # 1. 更新時間特徵 (略)
         pred_features['hour'] = future_time.hour
         pred_features['day_of_week'] = future_time.dayofweek
         pred_features['month'] = future_time.month
@@ -342,18 +347,16 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
         pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-        # 2. 模擬未來天氣變化 
+        # 2. 模擬未來天氣變化 (略)
         if has_weather:
             np.random.seed(future_time.hour + future_time.day + 42)
             for w_col in weather_feature_names:
                 base_value = current_data_dict.get(w_col)
                 if base_value is not None and pd.notna(base_value):
-                    # 簡單地隨機擾動天氣數據，確保有值
                     new_weather_value = base_value + np.random.normal(0, 0.5) 
                     pred_features[w_col] = new_weather_value
                     current_data_dict[w_col] = new_weather_value 
                 else:
-                    # 如果基礎天氣數據就是 NaN，保持為 NaN
                     pred_features[w_col] = np.nan
                     current_data_dict[w_col] = np.nan 
 
@@ -364,25 +367,24 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 3. 預測所有污染物
         for param in pollutant_params:
             model = models[param]
-            # 確保輸入是模型期望的特徵順序
             pred_input_list = [pred_features.get(col) for col in feature_cols]
             pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
             
-            # 使用 XGBoost 的缺失值處理功能，將 NaN 傳遞給模型 (XGBoost 預設處理)
+            # 即使輸入有 NaN，XGBoost 也能處理 (如果模型訓練時有缺失值)
             pred = model.predict(pred_input)[0]
             pred = max(0, pred) 
 
             current_prediction_row[f'{param}_pred'] = pred
             new_pollutant_values[param] = pred
 
-        # 4. 計算預測的 AQI
+        # 4. 計算預測的 AQI (略)
         predicted_aqi = calculate_aqi(pd.Series(current_prediction_row), pollutant_params, is_pred=True)
         current_prediction_row['aqi_pred'] = predicted_aqi
         new_pollutant_values['aqi'] = predicted_aqi
 
         predictions.append(current_prediction_row)
 
-        # 5. 更新滯後特徵
+        # 5. 更新滯後特徵 (略)
         for param in pollutant_params + ['aqi']:
             for i in range(len(LAG_HOURS) - 1, 0, -1):
                 lag_current = LAG_HOURS[i]
@@ -394,16 +396,11 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
-                # 無論是有效數值或 NaN，都將其作為下一個時間點的 lag_1h 特徵
                 current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
 
     return pd.DataFrame(predictions)
 
-
-# =================================================================
-# 模型載入邏輯 (略)
-# =================================================================
-
+# ... (load_models_and_metadata)
 def load_models_and_metadata():
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
 
@@ -449,6 +446,7 @@ def load_models_and_metadata():
         FEATURE_COLUMNS = []
         POLLUTANT_PARAMS = []
 
+
 # =================================================================
 # Flask 應用程式設定與啟動
 # =================================================================
@@ -460,26 +458,36 @@ with app.app_context():
 
 @app.route('/')
 def index():
+    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
     city_name = "高雄"
-    
-    if not TRAINED_MODELS or not POLLUTANT_PARAMS:
-        print("🚨 [Request] 模型或參數尚未初始化，無法進行預測。")
-        return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
     
     # 1. 嘗試即時抓取最新觀測數據
     current_observation_raw = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
 
-    observation_for_prediction = None
+    # 🚨 提取最新觀測 AQI 以供回退 (FALLBACK)
+    if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
+        obs_aqi_val = current_observation_raw['aqi'].iloc[0]
+        obs_time_val = current_observation_raw['datetime'].iloc[0]
+        
+        CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
+        
+        if pd.notna(obs_time_val):
+            if obs_time_val.tz is None:
+                 obs_time_val = obs_time_val.tz_localize('UTC')
+            
+            CURRENT_OBSERVATION_TIME = obs_time_val.tz_convert(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
+        else:
+             CURRENT_OBSERVATION_TIME = "N/A"
     
-    # 2. 數據整合邏輯
-    if current_observation_raw.empty or LAST_OBSERVATION is None or LAST_OBSERVATION.empty:
-        print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，退回使用模型載入時的數據。")
-        observation_for_prediction = LAST_OBSERVATION
-    else:
+    
+    # 2. 準備預測數據
+    observation_for_prediction = None
+    is_valid_for_prediction = False
+
+    if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
+        # 整合最新觀測數據到滯後數據中
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
-
         latest_row = current_observation_raw.iloc[0]
-
         observation_for_prediction['datetime'] = latest_row['datetime']
         
         for col in latest_row.index:
@@ -487,68 +495,90 @@ def index():
                  if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
                      observation_for_prediction[col] = latest_row[col]
             
-        print(f"✅ [Request] 成功整合最新觀測數據 (UTC: {observation_for_prediction['datetime'].iloc[0]})")
-        
-    # 3. 檢查最終預測數據來源
-    if observation_for_prediction is None or observation_for_prediction.empty:
-        print("🚨 [Request] 最終預測數據來源為空，無法進行預測。")
-        return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
+        # 🚨 檢查是否有足夠的特徵列
+        if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
+             is_valid_for_prediction = True
+             print("✅ [Request] 數據準備完成，準備進行預測。")
+        else:
+             print("⚠️ [Request] 整合數據後缺少模型所需的特徵列，將使用回退數據。")
+    else:
+        print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，無法進行預測。")
+
+
+    # 3. 進行預測或回退
+    max_aqi = CURRENT_OBSERVATION_AQI
+    aqi_predictions = []
     
-    # 🚨 最終修正：在傳入預測函式前，強制移除所有時區資訊，避免重複本地化錯誤
-    try:
-        observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-        if observation_for_prediction['datetime'].dt.tz is not None:
-             observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None)
-        print("✅ [Fix] 已安全清除預測數據中的時區資訊。")
-    except Exception as e:
-        print(f"⚠️ [Fix] 清除時區資訊失敗: {e}")
-    
-    # 4. 進行預測
-    try:
-        future_predictions = predict_future_multi(
-            TRAINED_MODELS,
-            observation_for_prediction, # 傳入 Naive 時間的數據
-            FEATURE_COLUMNS,
-            POLLUTANT_PARAMS,
-            hours=HOURS_TO_PREDICT
-        )
+    if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
+        try:
+            # 最終檢查時間區
+            observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
+            if observation_for_prediction['datetime'].dt.tz is not None:
+                 observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None)
 
-        future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-        
-        # --- 核心修正區塊：處理 NaN 值 ---
-        # 1. 確保 aqi_pred 欄位中的 np.nan 轉換為字串 "N/A"
-        # 2. .astype(object) 讓混合了 int/float/str 的資料安全轉換為 Python 類型
-        
-        # 計算最大 AQI
-        max_aqi_val = future_predictions['aqi_pred'].max()
-        max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else "N/A"
+            future_predictions = predict_future_multi(
+                TRAINED_MODELS,
+                observation_for_prediction,
+                FEATURE_COLUMNS,
+                POLLUTANT_PARAMS,
+                hours=HOURS_TO_PREDICT
+            )
 
-        # 準備傳遞給 Jinja2 模板的列表
-        predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
-        
-        # 將 NaN 替換為字串 "N/A"
-        predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
-        
-        # 將有效的數字轉換為整數 (但如果是 "N/A" 則保持字串)
-        predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
-             lambda x: int(x) if x != "N/A" else "N/A"
-        ).astype(object) # 使用 object 類型來儲存混合的 int 和 str
+            future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+            
+            # 處理 NaN 值並計算 Max AQI
+            predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
+            max_aqi_val = predictions_df['aqi_pred'].max()
+            max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
+            
+            # 將 NaN 替換為字串 "N/A"，並將有效數值轉換為整數
+            predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
+            predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
+                 lambda x: int(x) if x != "N/A" else "N/A"
+            ).astype(object)
 
-        aqi_predictions = [
-            {
-                'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
-                'aqi': item['aqi'] # 直接使用已經清理和轉換的欄位
-            }
-            for item in predictions_df.to_dict(orient='records')
-        ]
-        # --------------------------------
+            aqi_predictions = [
+                {
+                    'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
+                    'aqi': item['aqi']
+                }
+                for item in predictions_df.to_dict(orient='records')
+            ]
+            
+            if not aqi_predictions:
+                 # 預測列表為空，退回到顯示當前 AQI
+                 max_aqi = CURRENT_OBSERVATION_AQI
+                 print("⚠️ [Request] 預測列表為空，退回顯示最新觀測 AQI。")
+            else:
+                 print("✅ [Request] 預測成功！")
 
-    except Exception as e:
-        max_aqi = "N/A"
-        aqi_predictions = []
-        print(f"❌ [Request] 預測執行失敗: {e}") 
 
-    return render_template('index.html', max_aqi=max_aqi, aqi_predictions=aqi_predictions, city_name=city_name)
+        except Exception as e:
+            # 預測流程失敗，回退
+            max_aqi = CURRENT_OBSERVATION_AQI
+            aqi_predictions = []
+            print(f"❌ [Request] 預測執行失敗 ({e})，退回顯示最新觀測 AQI。") 
+            
+    else:
+         # 模型未載入或數據無效，產生一個簡單的當前觀測數據列表作為回退
+         print("🚨 [Request] 模型未載入或數據不完整，產生回退列表。")
+         max_aqi = CURRENT_OBSERVATION_AQI
+         
+         # 創建一個只包含當前觀測值的列表，告訴前端這是觀測值
+         if max_aqi != "N/A":
+             aqi_predictions.append({
+                'time': CURRENT_OBSERVATION_TIME,
+                'aqi': max_aqi,
+                'is_obs': True # 新增標記
+             })
+
+    # 4. 渲染模板
+    return render_template('index.html', 
+                           max_aqi=max_aqi, 
+                           aqi_predictions=aqi_predictions, 
+                           city_name=city_name,
+                           current_obs_time=CURRENT_OBSERVATION_TIME,
+                           is_fallback = not (bool(aqi_predictions) and 'is_obs' not in aqi_predictions[0]))
 
 if __name__ == '__main__':
     app.run(debug=True)
