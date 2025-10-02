@@ -11,7 +11,7 @@
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #f7f7f9;
+            background-color: #f7f7ff; /* 使用更柔和的背景色 */
         }
         .aqi-50 { @apply bg-green-500; }
         .aqi-100 { @apply bg-yellow-500; }
@@ -80,11 +80,10 @@
             </div>
         </div>
 
-        <!-- 新增折線圖區塊 -->
         <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">
                 {% if not is_fallback %}
-                    AQI 趨勢圖
+                    AQI 趨勢圖 (可拖曳與縮放)
                 {% else %}
                     當前 AQI 狀態
                 {% endif %}
@@ -92,6 +91,9 @@
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
             </div>
+            <p class="text-sm text-gray-500 mt-3">
+                提示：圖表預設顯示 $0 \sim 100$ 範圍。可**拖曳**平移視圖，按住 **Alt/Option 鍵 + 滾輪**縮放 Y 軸，**雙擊**重置。
+            </p>
         </div>
 
         <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
@@ -109,7 +111,7 @@
                     <span class="text-gray-600 font-medium text-sm md:text-base">
                         {{ prediction.time }} 
                         {% if not is_fallback %}
-                             ({{ '現在 +%s 小時' % loop.index }})
+                            ({{ '現在 +%s 小時' % loop.index }})
                         {% else %}
                             <span class="text-blue-500 font-bold">(觀測值)</span>
                         {% endif %}
@@ -136,6 +138,11 @@
     </div>
 
     <script>
+        // 註冊 Zoom 插件 (確保在 Chart.js 4 中能正常使用)
+        if (typeof ChartZoom !== 'undefined' && typeof Chart !== 'undefined') {
+            Chart.register(ChartZoom);
+        }
+
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -169,6 +176,11 @@
             
             const parsedAqi = parseInt(maxAqiValue);
 
+            // 移除所有顏色類別以避免衝突
+            ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'].forEach(c => {
+                aqiStatusElement.classList.remove(c);
+            });
+
             if (maxAqiValue !== "N/A" && !isNaN(parsedAqi)) {
                 aqiStatusElement.classList.add(getAqiColorClass(parsedAqi)); 
                 aqiStatusElement.classList.add('text-white');
@@ -181,6 +193,11 @@
                 const aqi = badge.getAttribute('data-aqi'); 
                 const parsedAqi = parseInt(aqi);
 
+                // 移除所有顏色類別
+                ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'].forEach(c => {
+                    badge.classList.remove(c);
+                });
+
                 if (aqi === "N/A" || isNaN(parsedAqi)) { 
                      badge.classList.add('aqi-default');
                 } else {
@@ -191,15 +208,19 @@
         }
 
         function createAqiChart() {
+            // 注意：這裡假設 aqi_predictions 是由 Flask/Jinja2 傳入的 JSON 陣列
             const predictions = {{ aqi_predictions | tojson | safe }};
             
             if (!predictions || predictions.length === 0) {
                 return;
             }
 
+            // 【修正 2】：X 軸標籤顯示為 MM-DD HH:MM
             const labels = predictions.map(p => {
-                const time = p.time.split(' ')[1];
-                return time;
+                const parts = p.time.split(' '); // 假設格式為 YYYY-MM-DD HH:MM
+                const date = parts[0].substring(5); // 取得 MM-DD
+                const time = parts[1]; // 取得 HH:MM
+                return `${date} ${time}`; // 顯示 MM-DD HH:MM
             });
 
             const data = predictions.map(p => {
@@ -231,6 +252,7 @@
                         pointHoverRadius: 7,
                         segment: {
                             borderColor: ctx => {
+                                // 讓線段顏色與點的顏色保持一致 (針對每個點的顏色變化)
                                 const index = ctx.p0DataIndex;
                                 return borderColors[index] || '#3B82F6';
                             }
@@ -244,19 +266,24 @@
                         legend: {
                             display: false
                         },
+                        // 【修正 1】：啟用並設定 Zoom 插件
                         zoom: {
                             pan: {
-                                enabled: true,
-                                mode: 'y',
+                                enabled: true, // 啟用平移 (拖曳)
+                                mode: 'y', // 限制只能垂直平移
                             },
                             zoom: {
-                                drag: {
-                                    enabled: true
-                                },
                                 wheel: {
-                                    enabled: true,
+                                    enabled: true, // 啟用滑鼠滾輪縮放
+                                    modifierKey: 'alt', // 建議使用 alt/option 鍵配合滾輪
+                                },
+                                drag: {
+                                    enabled: true // 啟用拖曳框選放大
                                 },
                                 mode: 'y'
+                            },
+                            onDoubleClick: ({chart}) => { // 雙擊重置視圖
+                                chart.resetZoom();
                             }
                         },
                         
@@ -287,9 +314,9 @@
                     scales: {
                         y: {
                             beginAtZero: true,
-                            min:0,
-                            max:500,
-                            suggestedMax: 100,
+                            min: 0,
+                            max: 500, // 鎖定 Y 軸實際最大範圍
+                            suggestedMax: 100, // 【修正 1】：設定預設視圖上限為 100
                             grid: {
                                 color: 'rgba(0, 0, 0, 0.05)'
                             },
@@ -316,7 +343,19 @@
                                     size: 11
                                 },
                                 maxRotation: 45,
-                                minRotation: 45
+                                minRotation: 45,
+                                // 【修正 3】：優化 X 軸刻度顯示，避免文字重疊
+                                callback: function(value, index, values) {
+                                    const fullLabel = this.getLabelForValue(value);
+                                    const parts = fullLabel.split(' '); // [MM-DD, HH:MM]
+                                    
+                                    // 每 6 個小時顯示完整的日期時間 (例如：09-29 08:00)
+                                    if (index % 6 === 0) { 
+                                        return fullLabel;
+                                    }
+                                    // 否則只顯示時間 (例如：14:00)
+                                    return parts[1]; 
+                                }
                             },
                             title: {
                                 display: true,
