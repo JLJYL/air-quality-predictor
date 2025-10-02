@@ -86,7 +86,7 @@
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
             </div>
-        </div>
+            </div>
 
         <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
             {% if not is_fallback %}
@@ -251,8 +251,6 @@
                         legend: {
                             display: false
                         },
-                        // 確保這裡沒有任何 'zoom' 配置
-                        
                         tooltip: {
                             backgroundColor: 'rgba(0, 0, 0, 0.8)',
                             padding: 12,
@@ -280,7 +278,6 @@
                     scales: {
                         y: {
                             beginAtZero: true,
-                            // 保持預設，讓 Chart.js 根據數據自動調整 Y 軸範圍
                             grid: {
                                 color: 'rgba(0, 0, 0, 0.05)'
                             },
