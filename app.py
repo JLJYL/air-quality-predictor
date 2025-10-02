@@ -1,4 +1,4 @@
-# app.py - 最終修正版本 (請替換掉您所有的 app.py 內容)
+# app.py - 最終修正版本 (已加入動態獲取最近站點功能)
 
 # =================================================================
 # 導入所有必要的庫 
@@ -31,7 +31,14 @@ API_KEY = "98765df2082f04dc9449e305bc736e93624b66e250fa9dfabcca53b31fc11647"
 HEADERS = {"X-API-Key": API_KEY}
 BASE = "https://api.openaq.org/v3"
 
-LOCATION_ID = 2395624 # 高雄市-前金 (請替換為您需要的站點 ID)
+# 新增：目標地理座標 (高雄市前金區中心點附近，作為預設搜尋點)
+TARGET_LAT = 22.6324 
+TARGET_LON = 120.2954
+
+# 初始站點 ID (將在啟動時被覆蓋)
+LOCATION_ID = 2395624 # 初始值：高雄市-前金
+LOCATION_NAME = "高雄市-前金" # 站點名稱
+
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
 PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
 
@@ -89,7 +96,51 @@ def get_location_meta(location_id: int):
             "last_local": last_local,
         }
     except Exception as e:
+        # print(f"Error fetching location meta for {location_id}: {e}")
         return None
+
+# =================================================================
+# 新增：獲取最近站點的函式
+# =================================================================
+def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
+    """
+    根據經緯度搜尋 OpenAQ 上最近的監測站。
+    預設會篩選出有提供 'pm25' 數據的站點，並按距離排序。
+    """
+    params = {
+        "coordinates": f"{lat},{lon}",
+        "radius": radius_km * 1000, # 轉換成公尺
+        "limit": 5,
+        "parameter_id": 2, # 尋找有 PM2.5 數據的站點
+        "order_by": "distance",
+        "sort": "asc"
+    }
+    
+    try:
+        r = requests.get(f"{BASE}/locations", headers=HEADERS, params=params, timeout=10)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        
+        if not results:
+            print("🚨 [Nearest] 在指定範圍內找不到任何站點。")
+            return None, None
+            
+        # 選擇最近的第一個結果
+        nearest_loc = results[0]
+        loc_id = int(nearest_loc["id"])
+        loc_name = nearest_loc["name"]
+        
+        print(f"✅ [Nearest] 成功找到最近站點: {loc_name} (ID: {loc_id})")
+        return loc_id, loc_name
+
+    except Exception as e:
+        print(f"❌ [Nearest] 搜尋最近站點失敗: {e}")
+        return None, None
+
+# -----------------------------------------------------------------
+# 以下函式 (get_location_latest_df, get_parameters_latest_df, pick_batch_near, fetch_latest_observation_data) 
+# 與計算 AQI 的函式 (calculate_aqi_sub_index, calculate_aqi) 皆保持不變
+# -----------------------------------------------------------------
 
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
     """站點各參數的『最新值清單』→ 正規化時間成 ts_utc / ts_local"""
@@ -123,6 +174,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
 
         return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
     except Exception as e:
+        # print(f"Error in get_location_latest_df: {e}")
         return pd.DataFrame()
 
 def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
@@ -166,6 +218,7 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
             rows.append(df[["parameter", "value", "units", "ts_utc", "ts_local"]])
 
     except Exception as e:
+        # print(f"Error in get_parameters_latest_df: {e}")
         pass
 
     if not rows:
@@ -324,9 +377,9 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     
     # 檢查並補齊特徵列，缺失則以 np.nan 填充 (讓 XGBoost 處理)
     current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
-                         if col in last_data.columns and not last_data[col].empty 
-                         else np.nan 
-                         for col in feature_cols} 
+                             if col in last_data.columns and not last_data[col].empty 
+                             else np.nan 
+                             for col in feature_cols} 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
@@ -453,6 +506,17 @@ def load_models_and_metadata():
 # =================================================================
 # Flask 應用程式設定與啟動
 # =================================================================
+
+# 在 Flask 實例化之前，先動態獲取最近站點 ID
+loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
+if loc_id is not None:
+    LOCATION_ID = loc_id
+    LOCATION_NAME = loc_name
+    print(f"🚀 預測目標站點已更新為: {LOCATION_NAME} (ID: {LOCATION_ID})")
+else:
+    print(f"⚠️ 無法找到最近站點，沿用預設站點: {LOCATION_NAME} (ID: {LOCATION_ID})")
+
+
 app = Flask(__name__)
 
 # 應用程式啟動時載入模型
@@ -461,8 +525,8 @@ with app.app_context():
 
 @app.route('/')
 def index():
-    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
-    city_name = "高雄"
+    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, LOCATION_ID, LOCATION_NAME
+    city_name = LOCATION_NAME
     
     # 1. 嘗試即時抓取最新觀測數據
     current_observation_raw = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
@@ -496,7 +560,7 @@ def index():
         for col in latest_row.index:
             if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
                  if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
-                     observation_for_prediction[col] = latest_row[col]
+                      observation_for_prediction[col] = latest_row[col]
             
         # 檢查是否有足夠的特徵列
         if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
@@ -568,25 +632,25 @@ def index():
             print(f"❌ [Request] 預測執行失敗 ({e})，退回顯示最新觀測 AQI。") 
             
     if is_fallback_mode:
-         # 模型未載入或數據無效，產生一個簡單的當前觀測數據列表作為回退
-         print("🚨 [Request] 最終使用回退模式。")
-         max_aqi = CURRENT_OBSERVATION_AQI
-         
-         # 創建一個只包含當前觀測值的列表，告訴前端這是觀測值
-         if max_aqi != "N/A":
-             aqi_predictions = [{
+          # 模型未載入或數據無效，產生一個簡單的當前觀測數據列表作為回退
+          print("🚨 [Request] 最終使用回退模式。")
+          max_aqi = CURRENT_OBSERVATION_AQI
+          
+          # 創建一個只包含當前觀測值的列表，告訴前端這是觀測值
+          if max_aqi != "N/A":
+              aqi_predictions = [{
                 'time': CURRENT_OBSERVATION_TIME,
                 'aqi': max_aqi,
                 'is_obs': True # 新增標記
-             }]
+              }]
 
     # 4. 渲染模板
     return render_template('index.html', 
-                           max_aqi=max_aqi, 
-                           aqi_predictions=aqi_predictions, 
-                           city_name=city_name,
-                           current_obs_time=CURRENT_OBSERVATION_TIME,
-                           is_fallback=is_fallback_mode)
+                            max_aqi=max_aqi, 
+                            aqi_predictions=aqi_predictions, 
+                            city_name=LOCATION_NAME, # 使用 LOCATION_NAME
+                            current_obs_time=CURRENT_OBSERVATION_TIME,
+                            is_fallback=is_fallback_mode)
 
 if __name__ == '__main__':
     app.run(debug=True)
