@@ -123,8 +123,6 @@
         function updateAqiColors() {
             const maxAqiValue = document.getElementById('maxAqiValue').innerText.trim();
             const aqiStatusElement = document.getElementById('aqiStatus');
-            const maxAqiCard = document.getElementById('maxAqiCard');
-            const aqiColorClass = getAqiColorClass(parseInt(maxAqiValue));
 
             // 更新主卡片狀態標籤的顏色
             if (maxAqiValue !== "N/A") {
