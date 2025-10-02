@@ -6,12 +6,11 @@
     <title>{{ city_name }} AQI 預測</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #f7f7ff; /* 使用更柔和的背景色 */
+            background-color: #f7f7ff;
         }
         .aqi-50 { @apply bg-green-500; }
         .aqi-100 { @apply bg-yellow-500; }
@@ -82,18 +81,11 @@
 
         <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">
-                {% if not is_fallback %}
-                    AQI 趨勢圖 (可拖曳與縮放)
-                {% else %}
-                    當前 AQI 狀態
-                {% endif %}
+                AQI 趨勢圖
             </h3>
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
             </div>
-            <p class="text-sm text-gray-500 mt-3">
-                提示：圖表預設顯示 $0 \sim 100$ 範圍。可**拖曳**平移視圖，按住 **Alt/Option 鍵 + 滾輪**縮放 Y 軸，**雙擊**重置。
-            </p>
         </div>
 
         <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
@@ -138,11 +130,6 @@
     </div>
 
     <script>
-        // 註冊 Zoom 插件 (確保在 Chart.js 4 中能正常使用)
-        if (typeof ChartZoom !== 'undefined' && typeof Chart !== 'undefined') {
-            Chart.register(ChartZoom);
-        }
-
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -208,14 +195,13 @@
         }
 
         function createAqiChart() {
-            // 注意：這裡假設 aqi_predictions 是由 Flask/Jinja2 傳入的 JSON 陣列
             const predictions = {{ aqi_predictions | tojson | safe }};
             
             if (!predictions || predictions.length === 0) {
                 return;
             }
 
-            // 【修正 2】：X 軸標籤顯示為 MM-DD HH:MM
+            // X 軸標籤顯示為 MM-DD HH:MM
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); // 假設格式為 YYYY-MM-DD HH:MM
                 const date = parts[0].substring(5); // 取得 MM-DD
@@ -252,7 +238,6 @@
                         pointHoverRadius: 7,
                         segment: {
                             borderColor: ctx => {
-                                // 讓線段顏色與點的顏色保持一致 (針對每個點的顏色變化)
                                 const index = ctx.p0DataIndex;
                                 return borderColors[index] || '#3B82F6';
                             }
@@ -266,7 +251,7 @@
                         legend: {
                             display: false
                         },
-                        
+                        // 移除所有 Zoom 相關配置
                         
                         tooltip: {
                             backgroundColor: 'rgba(0, 0, 0, 0.8)',
@@ -295,9 +280,7 @@
                     scales: {
                         y: {
                             beginAtZero: true,
-                            min: 0,
-                            max: 500, // 鎖定 Y 軸實際最大範圍
-                            suggestedMax: 100, // 【修正 1】：設定預設視圖上限為 100
+                            // 移除 min, max, suggestedMax，讓 Y 軸根據數據自動調整
                             grid: {
                                 color: 'rgba(0, 0, 0, 0.05)'
                             },
@@ -325,16 +308,16 @@
                                 },
                                 maxRotation: 45,
                                 minRotation: 45,
-                                // 【修正 3】：優化 X 軸刻度顯示，避免文字重疊
+                                // 優化 X 軸刻度顯示，每 6 小時顯示完整日期
                                 callback: function(value, index, values) {
                                     const fullLabel = this.getLabelForValue(value);
                                     const parts = fullLabel.split(' '); // [MM-DD, HH:MM]
                                     
-                                    // 每 6 個小時顯示完整的日期時間 (例如：09-29 08:00)
+                                    // 每 6 個小時顯示完整的日期時間
                                     if (index % 6 === 0) { 
                                         return fullLabel;
                                     }
-                                    // 否則只顯示時間 (例如：14:00)
+                                    // 否則只顯示時間
                                     return parts[1]; 
                                 }
                             },
