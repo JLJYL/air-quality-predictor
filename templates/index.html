@@ -6,6 +6,7 @@
     <title>{{ city_name }} AQI 預測</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
@@ -243,6 +244,22 @@
                         legend: {
                             display: false
                         },
+                        zoom: {
+                            pan: {
+                                enabled: true,
+                                mode: 'y',
+                            },
+                            zoom: {
+                                drag: {
+                                    enabled: true
+                                },
+                                wheel: {
+                                    enabled: true,
+                                },
+                                mode: 'y'
+                            }
+                        },
+                        
                         tooltip: {
                             backgroundColor: 'rgba(0, 0, 0, 0.8)',
                             padding: 12,
