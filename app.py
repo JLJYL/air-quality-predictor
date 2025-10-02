@@ -85,7 +85,6 @@ def get_location_meta(location_id: int):
             "last_local": last_local,
         }
     except Exception as e:
-        # print(f"❌ [Fetch] get_location_meta 失敗: {e}")
         return None
 
 
@@ -124,7 +123,6 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
 
         return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
     except Exception as e:
-        # print(f"❌ [Fetch] get_location_latest_df 失敗: {e}")
         return pd.DataFrame()
 
 
@@ -171,7 +169,6 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
             rows.append(df[["parameter", "value", "units", "ts_utc", "ts_local"]])
 
     except Exception as e:
-        # print(f"❌ [Fetch] get_parameters_latest_df 失敗: {e}")
         pass
 
     if not rows:
@@ -186,7 +183,6 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
 
     df = df.copy()
 
-    # 確保 ts_utc 是單一值且為 NaT-aware
     def _scalarize(v):
         if isinstance(v, (list, tuple, np.ndarray)):
             return v[0] if len(v) else None
@@ -195,7 +191,6 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
     df["ts_utc"] = df["ts_utc"].map(_scalarize)
     df["ts_utc"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
 
-    # 接著就能安全做時間距離比較
     df["dt_diff"] = (df["ts_utc"] - t_ref).abs()
 
     tol = pd.Timedelta(minutes=tol_minutes)
@@ -203,7 +198,6 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
     if df.empty:
         return df
 
-    # 排序：參數、時間距離最小、最新時間 (確保同一參數只留最接近 t_ref 的那筆)
     df = df.sort_values(["parameter", "dt_diff", "ts_utc"], ascending=[True, True, False])
     df = df.drop_duplicates(subset=["parameter"], keep="first")
     return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
@@ -213,12 +207,10 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     """從 OpenAQ 抓取並轉換成單行寬表（只含當前原始值）"""
     meta = get_location_meta(location_id)
     if not meta or pd.isna(meta["last_utc"]):
-        # print("🚨 [Fetch] 無法取得站點元數據或最後更新時間。")
         return pd.DataFrame()
 
     df_loc_latest = get_location_latest_df(location_id)
     if df_loc_latest.empty:
-        # print("⚠️ [Fetch] /locations/{id}/latest 沒有任何資料。")
         return pd.DataFrame()
 
     # 決定對齊時間 t_star
@@ -227,7 +219,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     t_star = t_star_latest if pd.notna(t_star_latest) else t_star_loc
 
     if pd.isna(t_star):
-        # print("🚨 [Fetch] 無法決定有效的批次對齊時間。")
         return pd.DataFrame()
     
     # 1. 在 /locations/{id}/latest 中找「接近 t_star」的一批
@@ -249,7 +240,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     # 3. 合併、只留目標參數、去重
     frames = [df for df in [df_at_batch, df_param_batch] if not df.empty]
     if not frames:
-        # print("⚠️ [Fetch] 在最後一批時間附近，目標污染物都沒有資料。")
         return pd.DataFrame()
 
     df_all = pd.concat(frames, ignore_index=True)
@@ -273,8 +263,16 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
         observation['aqi'] = observation.apply(
             lambda row: calculate_aqi(row, target_params, is_pred=False), axis=1
         )
-        # 確保時間是 UTC-aware (但要去掉 tzinfo 避免 JSON 序列化問題，會在 predict_future_multi 中重新處理)
-        observation['datetime'] = observation['datetime'].dt.tz_localize(None).dt.tz_localize('UTC')
+        
+    # 修正：由於 ts_utc 已經是 UTC-aware，這裡不需要再進行任何時區本地化操作。
+    # 只需要確保它最終被正確地轉換成 Pandas Datetime 類型。
+    if not observation.empty:
+        # 將時間轉換為 Datetime 類型
+        observation['datetime'] = pd.to_datetime(observation['datetime'])
+        # 如果時間是 naive (無時區資訊)，則設定為 UTC
+        if observation['datetime'].dt.tz is None:
+             observation['datetime'] = observation['datetime'].dt.tz_localize('UTC')
+
 
     return observation
 
@@ -299,13 +297,11 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
             I = ((I_high - I_low) / (C_high - C_low)) * (concentration - C_low) + I_low
             return np.round(I)
 
-        # 處理濃度高於最高區間的情況
         if concentration > breakpoints[-1][1]:
             I_low, I_high = breakpoints[-1][2], breakpoints[-1][3]
             C_low, C_high = breakpoints[-1][0], breakpoints[-1][1]
             if C_high == C_low:
                 return I_high
-            # 假設線性外推 (這在實際 AQI 標準中可能會有所不同，但這裡保持原邏輯)
             I_rate = (I_high - I_low) / (C_high - C_low)
             I = I_high + I_rate * (concentration - C_high)
             return np.round(I)
@@ -316,7 +312,6 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> int:
     """根據多個污染物濃度計算最終 AQI (取最大子指數)"""
     sub_indices = []
     for p in params:
-        # 根據是觀測值還是預測值選擇欄位名稱
         col_name = f'{p}_pred' if is_pred else p
         if col_name in row and not pd.isna(row[col_name]):
             sub_index = calculate_aqi_sub_index(p, row[col_name])
@@ -336,8 +331,16 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # 確保 last_data 是 UTC-aware
-    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
+    # 修正時區錯誤：安全地將時間轉為 UTC-aware
+    last_data['datetime'] = pd.to_datetime(last_data['datetime'])
+    
+    # 檢查是否已是時區感知 (tz-aware)。如果是，就轉換成 UTC，否則本地化為 UTC。
+    if last_data['datetime'].dt.tz is None:
+        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+    elif last_data['datetime'].dt.tz != timezone.utc:
+        # 如果不是 UTC，就轉換成 UTC，而不是再次 localize
+        last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
+         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
     # 創建可變字典副本作為迭代的基礎，必須包含所有 feature_cols
@@ -378,7 +381,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 3. 預測所有污染物
         for param in pollutant_params:
             model = models[param]
-            # 確保輸入特徵的順序與模型訓練時一致
             pred_input = np.array([pred_features[col] for col in feature_cols]).reshape(1, -1)
             pred = model.predict(pred_input)[0]
             pred = max(0, pred) 
@@ -395,7 +397,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
         # 5. 更新滯後特徵
         for param in pollutant_params + ['aqi']:
-            # 從最大的 Lag 開始更新
             for i in range(len(LAG_HOURS) - 1, 0, -1):
                 lag_current = LAG_HOURS[i]
                 lag_prev = LAG_HOURS[i-1]
@@ -405,7 +406,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 if lag_current_col in current_data_dict and lag_prev_col in current_data_dict:
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
-            # 更新 1 小時滯後特徵為當前預測值
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                 current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
 
@@ -413,7 +413,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# 模型載入邏輯 (載入模型和舊的 LAST_OBSERVATION)
+# 模型載入邏輯
 # =================================================================
 
 def load_models_and_metadata():
@@ -487,7 +487,6 @@ def index():
     observation_for_prediction = None
     
     # 2. 數據整合邏輯
-    # 確保 LAST_OBSERVATION 有值，才能用於提供滯後特徵
     if current_observation_raw.empty or LAST_OBSERVATION is None or LAST_OBSERVATION.empty:
         print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，退回使用模型載入時的數據。")
         observation_for_prediction = LAST_OBSERVATION
