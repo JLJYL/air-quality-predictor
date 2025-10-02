@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ city_name }} AQI 預測</title>
-    <!-- 引入 Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* 使用 Inter 字體以保持現代感和清晰度 */
@@ -35,21 +34,32 @@
 
     <div class="max-w-4xl mx-auto">
         
-        <!-- 標題區域 -->
         <header class="text-center mb-10">
             <h1 class="text-4xl md:text-5xl font-extrabold text-gray-900 mb-2">
-                {{ city_name }} 空氣品質預測
+                {{ city_name }} 空氣品質{% if not is_fallback %}預測{% else %}觀測{% endif %}
             </h1>
+            
+            {% if not is_fallback %}
             <p class="text-lg text-gray-600">未來 {{ aqi_predictions | length if aqi_predictions else 24 }} 小時 AQI 趨勢</p>
             <p class="text-sm text-gray-400 mt-1">（數據初始化於應用程式啟動時完成）</p>
+            {% else %}
+            <p class="text-lg text-red-500 font-bold">⚠️ 無法載入模型或進行預測，目前顯示最新觀測數據。</p>
+            <p class="text-sm text-gray-600 mt-1">最新觀測時間：{{ current_obs_time }}</p>
+            {% endif %}
+            
         </header>
 
-        <!-- 主要資訊卡片：最大 AQI -->
         <div id="maxAqiCard" class="shadow-2xl rounded-xl p-6 md:p-8 mb-10 text-white transition duration-500 transform hover:scale-[1.01] flex flex-col md:flex-row justify-between items-center" 
              style="background-color: #2c3e50;">
             
             <div class="mb-4 md:mb-0">
-                <p class="text-lg font-medium opacity-80">未來 24 小時內最大預測 AQI</p>
+                <p class="text-lg font-medium opacity-80">
+                    {% if not is_fallback %}
+                        未來 24 小時內最大預測 AQI
+                    {% else %}
+                        最新觀測 AQI
+                    {% endif %}
+                </p>
                 <h2 id="maxAqiValue" class="text-6xl md:text-7xl font-black mt-1">
                     {{ max_aqi }}
                 </h2>
@@ -58,13 +68,13 @@
             <div id="aqiStatus" class="rounded-full px-6 py-2 text-xl font-bold shadow-md">
                 {% if max_aqi == "N/A" %}
                     N/A
-                {% elif max_aqi <= 50 %}
+                {% elif max_aqi | int <= 50 %}
                     良好
-                {% elif max_aqi <= 100 %}
+                {% elif max_aqi | int <= 100 %}
                     普通
-                {% elif max_aqi <= 150 %}
+                {% elif max_aqi | int <= 150 %}
                     對敏感族群不健康
-                {% elif max_aqi <= 200 %}
+                {% elif max_aqi | int <= 200 %}
                     不健康
                 {% else %}
                     非常不健康
@@ -72,19 +82,27 @@
             </div>
         </div>
 
-        <!-- 預測細節列表 -->
-        <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">逐小時預測明細</h3>
+        <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
+            {% if not is_fallback %}
+                逐小時預測明細
+            {% else %}
+                最新觀測數據
+            {% endif %}
+        </h3>
         
         <div id="predictionsList" class="space-y-3 max-h-[60vh] overflow-y-auto scrollbar-hide p-2 bg-white rounded-lg shadow-inner">
             {% if aqi_predictions %}
                 {% for prediction in aqi_predictions %}
                 <div class="flex justify-between items-center p-4 rounded-lg shadow-sm border border-gray-100 hover:bg-gray-50 transition duration-150">
-                    <!-- 時間 -->
                     <span class="text-gray-600 font-medium text-sm md:text-base">
-                        {{ prediction.time }} ({{ '現在 +%s 小時' % loop.index }})
+                        {{ prediction.time }} 
+                        {% if not is_fallback %}
+                             ({{ '現在 +%s 小時' % loop.index }})
+                        {% else %}
+                            <span class="text-blue-500 font-bold">(觀測值)</span>
+                        {% endif %}
                     </span>
                     
-                    <!-- AQI 數值圓圈 -->
                     <div class="flex items-center space-x-3">
                         <span class="text-gray-700 font-semibold text-base md:text-lg">
                             AQI:
@@ -97,8 +115,8 @@
                 {% endfor %}
             {% else %}
                 <div class="text-center p-10 text-gray-500">
-                    <p class="mb-2 text-xl font-semibold">❌ 預測數據載入失敗</p>
-                    <p>請檢查後端日誌，確認模型和數據是否已成功初始化。</p>
+                    <p class="mb-2 text-xl font-semibold">❌ 數據載入失敗</p>
+                    <p>請確認您的 **models** 資料夾和 **model_meta.json** 檔案是否存在。</p>
                 </div>
             {% endif %}
         </div>
@@ -110,7 +128,8 @@
         
         /* 根據 AQI 數值返回對應的 Tailwind 類 */
         function getAqiColorClass(aqi) {
-            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default';
+            // 檢查是否為字串 "N/A" 或無效值
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
             if (aqi <= 100) return 'aqi-100';
             if (aqi <= 150) return 'aqi-150';
@@ -121,23 +140,28 @@
         function updateAqiColors() {
             const maxAqiValue = document.getElementById('maxAqiValue').innerText.trim();
             const aqiStatusElement = document.getElementById('aqiStatus');
-            const maxAqiCard = document.getElementById('maxAqiCard');
-            const aqiColorClass = getAqiColorClass(parseInt(maxAqiValue));
+            
+            const parsedAqi = parseInt(maxAqiValue);
 
-            // 更新主卡片顏色
-            if (maxAqiValue !== "N/A") {
-                maxAqiCard.classList.remove('bg-gray-400'); // 移除預設顏色
-                // 替換主卡片背景色為深藍色，以保持主視覺穩定，僅用文字標籤顏色標示狀態
-                aqiStatusElement.classList.add(getAqiColorClass(parseInt(maxAqiValue))); 
+            // 更新主卡片狀態標籤顏色
+            if (maxAqiValue !== "N/A" && !isNaN(parsedAqi)) {
+                aqiStatusElement.classList.add(getAqiColorClass(parsedAqi)); 
+                aqiStatusElement.classList.add('text-white');
+            } else {
+                aqiStatusElement.classList.add('aqi-default');
                 aqiStatusElement.classList.add('text-white');
             }
 
 
             // 更新列表中的小圓圈顏色
             document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => {
-                const aqi = parseInt(badge.getAttribute('data-aqi'));
-                if (!isNaN(aqi)) {
-                    const colorClass = getAqiColorClass(aqi);
+                const aqi = badge.getAttribute('data-aqi'); 
+                const parsedAqi = parseInt(aqi);
+
+                if (aqi === "N/A" || isNaN(parsedAqi)) { 
+                     badge.classList.add('aqi-default');
+                } else {
+                    const colorClass = getAqiColorClass(parsedAqi);
                     badge.classList.add(colorClass);
                 }
             });
