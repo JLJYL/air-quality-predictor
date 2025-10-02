@@ -48,7 +48,8 @@
                 <p class="text-sm font-semibold text-gray-700 uppercase">預測期間 (24H) 最高 AQI</p>
                 <div class="flex items-center justify-between mt-2">
                     <!-- max_aqi 變數 -->
-                    <span id="max-aqi-display" class="text-6xl font-extrabold">{{ max_aqi }}</span>
+                    <!-- 修正: 確保即使 max_aqi 為空/null 時，也能顯示 'N/A' -->
+                    <span id="max-aqi-display" class="text-6xl font-extrabold">{{ max_aqi if max_aqi is not none and max_aqi != '' else 'N/A' }}</span>
                     <!-- AQI 狀態標籤 -->
                     <span id="aqi-status" class="text-xl font-bold rounded-full px-4 py-2 shadow-md"></span>
                 </div>
@@ -113,7 +114,8 @@
          * 更新頁面上的最高 AQI 狀態卡片 (顏色和文字)
          */
         function updateAqiStatusCard() {
-            const aqi = parseInt(maxAqiValue);
+            // maxAqiValue 現在可能是 'N/A'
+            const aqi = parseInt(maxAqiValue); 
             const info = getAqiInfo(aqi);
             const card = document.getElementById('max-aqi-card');
             const statusSpan = document.getElementById('aqi-status');
