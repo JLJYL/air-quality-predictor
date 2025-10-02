@@ -104,8 +104,15 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # last_data 現在是單行 DataFrame，需要先轉換時間格式
-    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
+    # last_data 現在是單行 DataFrame，需要確保其時間格式和時區設定正確
+    last_data['datetime'] = pd.to_datetime(last_data['datetime'])
+
+    # 修正時區問題: 如果已是 tz-aware，則轉換為 UTC；否則，將其視為 UTC 來本地化。
+    if last_data['datetime'].dt.tz is not None:
+        last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
+    else:
+        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+
     last_datetime_aware = last_data['datetime'].iloc[0]
     # 注意：這裡使用 to_dict() 創建一個可變字典副本作為迭代的基礎
     current_data_dict = last_data[feature_cols].iloc[0].to_dict()
