@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ city_name }} AQI 預測與污染物趨勢</title>
+    <title>{{ city_name }} 空氣品質預測</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
@@ -19,11 +19,17 @@
         .aqi-300 { @apply bg-purple-700; }
         .aqi-default { @apply bg-gray-400; }
 
-        /* 新增: 污染物圖表的佈局 */
+        /* 使用 Tailwind Grid 來佈局污染物圖表，使其在寬螢幕上兩兩一組，類似你的圖片風格 */
         .pollutant-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
+            grid-template-columns: repeat(2, 1fr); /* 預設兩欄 */
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .pollutant-grid {
+                grid-template-columns: 1fr; /* 小螢幕變為單欄 */
+            }
         }
     </style>
 </head>
@@ -89,32 +95,22 @@
 
         <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-3">
-                主要污染物趨勢圖 (濃度)
+                主要污染物濃度趨勢 (未來 24 小時)
             </h3>
             <div class="pollutant-grid">
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">PM2.5 微細懸浮粒子 (μg/m³)</h4>
-                    <canvas id="chartPM25"></canvas>
+                <div class="relative bg-gray-50 p-4 rounded-lg shadow-inner">
+                    <h4 class="text-center font-bold text-lg text-gray-800 mb-2">PM2.5 / PM10</h4>
+                    <div style="height: 250px;"><canvas id="chartParticulates"></canvas></div>
                 </div>
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">PM10 懸浮粒子 (μg/m³)</h4>
-                    <canvas id="chartPM10"></canvas>
+                
+                <div class="relative bg-gray-50 p-4 rounded-lg shadow-inner">
+                    <h4 class="text-center font-bold text-lg text-gray-800 mb-2">O3 (臭氧) / NO2 (二氧化氮)</h4>
+                    <div style="height: 250px;"><canvas id="chartO3NO2"></canvas></div>
                 </div>
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">O3 臭氧 (ppm)</h4>
-                    <canvas id="chartO3"></canvas>
-                </div>
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">NO2 二氧化氮 (ppm)</h4>
-                    <canvas id="chartNO2"></canvas>
-                </div>
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">SO2 二氧化硫 (ppm)</h4>
-                    <canvas id="chartSO2"></canvas>
-                </div>
-                <div class="relative" style="height: 300px;">
-                    <h4 class="text-center font-medium mb-2 text-gray-700">CO 一氧化碳 (ppm)</h4>
-                    <canvas id="chartCO"></canvas>
+
+                <div class="relative bg-gray-50 p-4 rounded-lg shadow-inner">
+                    <h4 class="text-center font-bold text-lg text-gray-800 mb-2">SO2 (二氧化硫) / CO (一氧化碳)</h4>
+                    <div style="height: 250px;"><canvas id="chartSO2CO"></canvas></div>
                 </div>
             </div>
         </div>
@@ -139,15 +135,6 @@
             return '#7C3AED';
         }
 
-        function getAqiBackgroundColor(aqi) {
-            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'rgba(156, 163, 175, 0.1)';
-            if (aqi <= 50) return 'rgba(16, 185, 129, 0.1)';
-            if (aqi <= 100) return 'rgba(234, 179, 8, 0.1)';
-            if (aqi <= 150) return 'rgba(249, 115, 22, 0.1)';
-            if (aqi <= 200) return 'rgba(220, 38, 38, 0.1)';
-            return 'rgba(124, 58, 237, 0.1)';
-        }
-        
         function updateAqiColors() {
             const maxAqiValue = document.getElementById('maxAqiValue').innerText.trim();
             const aqiStatusElement = document.getElementById('aqiStatus');
@@ -168,86 +155,150 @@
             }
         }
 
-        // 新增的函數：建立單個污染物圖表
-        function createPollutantChart(elementId, pollutantName, rawData, labelText, color) {
+        // --- 新增: 繪製多條線的污染物趨勢圖 ---
+        function createMultiPollutantChart(elementId, pollutantData, chartTitle) {
             const ctx = document.getElementById(elementId).getContext('2d');
             
-            if (!rawData || rawData.length === 0) {
+            // 由於我們不知道您的後端資料格式，這裡使用一個模擬數據，以便圖表能正常顯示。
+            // 請確保您的後端 { pollutant_predictions } 包含 PM25, PM10, O3, NO2, SO2, CO 的預測資料。
+            const pollutant_predictions = {{ pollutant_predictions | tojson | safe }};
+
+            // 確保資料存在
+            if (!pollutantData || pollutantData.length === 0 || !pollutant_predictions) {
                 return;
             }
 
-            const labels = rawData.map(p => {
+            const labels = pollutant_predictions.PM25 ? pollutant_predictions.PM25.map(p => {
                 const parts = p.time.split(' '); 
-                const date = parts[0].substring(5); 
                 const time = parts[1]; 
-                return `${date} ${time}`; 
-            });
+                return time; 
+            }) : [];
 
-            const data = rawData.map(p => {
-                const value = p.value;
-                return (value === "N/A" || isNaN(value)) ? null : parseFloat(value);
-            });
+            const datasets = [];
+
+            // 粒子物圖表
+            if (elementId === 'chartParticulates') {
+                const pm25Data = pollutant_predictions.PM25 ? pollutant_predictions.PM25.map(p => parseFloat(p.value)) : [];
+                const pm10Data = pollutant_predictions.PM10 ? pollutant_predictions.PM10.map(p => parseFloat(p.value)) : [];
+
+                datasets.push({
+                    label: 'PM2.5 (μg/m³)',
+                    data: pm25Data,
+                    borderColor: 'rgb(245, 158, 11)', // 橙色
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    yAxisID: 'y1', // 使用 y1 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+                datasets.push({
+                    label: 'PM10 (μg/m³)',
+                    data: pm10Data,
+                    borderColor: 'rgb(59, 130, 246)', // 藍色
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    yAxisID: 'y1', // 使用 y1 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+            } 
+            // 氣體圖表 1 (O3, NO2)
+            else if (elementId === 'chartO3NO2') {
+                const o3Data = pollutant_predictions.O3 ? pollutant_predictions.O3.map(p => parseFloat(p.value)) : [];
+                const no2Data = pollutant_predictions.NO2 ? pollutant_predictions.NO2.map(p => parseFloat(p.value)) : [];
+
+                datasets.push({
+                    label: 'O3 (ppm)',
+                    data: o3Data,
+                    borderColor: 'rgb(16, 185, 129)', // 綠色
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    yAxisID: 'y2', // 使用 y2 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+                datasets.push({
+                    label: 'NO2 (ppm)',
+                    data: no2Data,
+                    borderColor: 'rgb(239, 68, 68)', // 紅色
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    yAxisID: 'y2', // 使用 y2 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+            }
+            // 氣體圖表 2 (SO2, CO)
+            else if (elementId === 'chartSO2CO') {
+                const so2Data = pollutant_predictions.SO2 ? pollutant_predictions.SO2.map(p => parseFloat(p.value)) : [];
+                const coData = pollutant_predictions.CO ? pollutant_predictions.CO.map(p => parseFloat(p.value)) : [];
+
+                datasets.push({
+                    label: 'SO2 (ppm)',
+                    data: so2Data,
+                    borderColor: 'rgb(139, 92, 246)', // 紫色
+                    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                    yAxisID: 'y2', // 使用 y2 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+                datasets.push({
+                    label: 'CO (ppm)',
+                    data: coData,
+                    borderColor: 'rgb(75, 85, 99)', // 灰色
+                    backgroundColor: 'rgba(75, 85, 99, 0.1)',
+                    yAxisID: 'y2', // 使用 y2 軸
+                    tension: 0.2, borderWidth: 2, pointRadius: 1,
+                });
+            }
+
 
             new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: pollutantName,
-                        data: data,
-                        borderColor: color,
-                        backgroundColor: color.replace(')', ', 0.1)').replace('rgb', 'rgba'),
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 2,
-                        pointBackgroundColor: color,
-                        pointBorderColor: '#fff',
-                        pointBorderWidth: 1,
-                        pointHoverRadius: 4,
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false },
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'top', labels: { boxWidth: 10, font: { size: 12 } } },
                         tooltip: {
                             callbacks: {
                                 label: function(context) {
-                                    return `${pollutantName}: ${context.parsed.y} ${labelText.substring(labelText.indexOf('(')+1, labelText.lastIndexOf(')'))}`;
+                                    const unit = context.dataset.label.includes('(μg/m³)') ? 'μg/m³' : 'ppm';
+                                    const value = context.parsed.y;
+                                    const label = context.dataset.label.split(' ')[0];
+                                    return `${label}: ${value.toFixed(3)} ${unit}`;
                                 }
                             }
                         }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            grid: { color: 'rgba(0, 0, 0, 0.05)' },
-                            title: {
-                                display: true,
-                                text: labelText,
-                            }
-                        },
-                        x: {
-                            display: false, // 隱藏 X 軸標籤以節省空間，只在 AQI 主圖顯示
-                            grid: { display: false }
-                        }
-                    }
-                }
-            });
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { maxRotation: 45, minRotation: 45, font: { size: 10 } }
+                        },
+                        // PM2.5/PM10 軸
+                        y1: { 
+                            type: 'linear', position: 'left', display: elementId === 'chartParticulates',
+                            title: { display: true, text: '濃度 (μg/m³)', font: { size: 11 } },
+                            min: 0,
+                            grid: { color: 'rgba(0, 0, 0, 0.05)' }
+                        },
+                        // 氣體污染物軸
+                        y2: { 
+                            type: 'linear', position: 'left', display: elementId !== 'chartParticulates',
+                            title: { display: true, text: '濃度 (ppm)', font: { size: 11 } },
+                            min: 0,
+                            grid: { color: 'rgba(0, 0, 0, 0.05)' }
+                        }
+                    }
+                }
+            });
         }
+        // --- 結束: 繪製多條線的污染物趨勢圖 ---
+
 
         function createAqiChart() {
+            // 假設後端提供 AQI 和污染物預測數據
             const predictions = {{ aqi_predictions | tojson | safe }};
-            // 假設後端提供污染物預測數據，你需要將其替換為實際的後端變數
             const pollutant_predictions = {{ pollutant_predictions | tojson | safe }};
             
             if (!predictions || predictions.length === 0) {
                 return;
             }
 
-            // AQI Chart 建立邏輯 (修正了 max: 500 的錯誤)
+            // AQI Chart 建立邏輯 (與上次相同)
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); 
                 const date = parts[0].substring(5); 
@@ -261,7 +312,6 @@
             });
 
             const borderColors = data.map(aqi => getAqiColor(aqi));
-            const backgroundColors = data.map(aqi => getAqiBackgroundColor(aqi));
 
             const ctx = document.getElementById('aqiChart').getContext('2d');
             
@@ -344,22 +394,20 @@
                             },
                             title: {
                                 display: true,
-                                text: '時間',
+                                text: '日期與時間',
                                 font: { size: 14, weight: 'bold' }
                             }
                         }
                     }
                 }
             });
-
-            // 呼叫新增的污染物圖表建立函數
-            if (pollutant_predictions) {
-                createPollutantChart('chartPM25', 'PM2.5', pollutant_predictions.PM25, '濃度 (μg/m³)', 'rgb(245, 158, 11)'); // 橙色
-                createPollutantChart('chartPM10', 'PM10', pollutant_predictions.PM10, '濃度 (μg/m³)', 'rgb(59, 130, 246)'); // 藍色
-                createPollutantChart('chartO3', 'O3', pollutant_predictions.O3, '濃度 (ppm)', 'rgb(16, 185, 129)'); // 綠色
-                createPollutantChart('chartNO2', 'NO2', pollutant_predictions.NO2, '濃度 (ppm)', 'rgb(239, 68, 68)'); // 紅色
-                createPollutantChart('chartSO2', 'SO2', pollutant_predictions.SO2, '濃度 (ppm)', 'rgb(139, 92, 246)'); // 紫色
-                createPollutantChart('chartCO', 'CO', pollutant_predictions.CO, '濃度 (ppm)', 'rgb(75, 85, 99)'); // 灰色
+            
+            // 繪製污染物圖表
+            if (pollutant_predictions && pollutant_predictions.PM25) {
+                // 將污染物分成三組，每組繪製在一張圖上
+                createMultiPollutantChart('chartParticulates', [pollutant_predictions.PM25, pollutant_predictions.PM10], 'PM2.5 / PM10 趨勢');
+                createMultiPollutantChart('chartO3NO2', [pollutant_predictions.O3, pollutant_predictions.NO2], 'O3 / NO2 趨勢');
+                createMultiPollutantChart('chartSO2CO', [pollutant_predictions.SO2, pollutant_predictions.CO], 'SO2 / CO 趨勢');
             }
         }
 
