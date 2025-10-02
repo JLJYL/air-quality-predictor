@@ -25,7 +25,7 @@ MODELS_DIR = 'models'
 META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
 
 # =================================================================
-# OpenAQ V3 常數設定 (新增)
+# OpenAQ V3 常數設定
 # =================================================================
 # 請務必使用您的實際 API Key，這裡使用範例 Key
 API_KEY = "98765df2082f04dc9449e305bc736e93624b66e250fa9dfabcca53b31fc11647"
@@ -69,7 +69,35 @@ AQI_BREAKPOINTS = {
 }
 
 # =================================================================
-# 輔助函式: OpenAQ V3 數據抓取 (整合自第一個腳本)
+# 輔助函式: 時間特徵提取 (新增)
+# =================================================================
+
+def extract_time_features(dt: pd.Timestamp):
+    """從 UTC 時間戳中提取時間和季節性特徵。"""
+    # 確保 dt 是 tz-aware 且轉為 UTC (如果不是的話)
+    if dt.tz is None:
+        dt = dt.tz_localize(timezone.utc)
+    else:
+        dt = dt.tz_convert(timezone.utc)
+        
+    features = {}
+    features['hour'] = dt.hour
+    features['day_of_week'] = dt.dayofweek
+    features['month'] = dt.month
+    features['day_of_year'] = dt.timetuple().tm_yday
+    features['is_weekend'] = int(dt.dayofweek in [5, 6])
+    
+    # 循環特徵 (Cyclical Features)
+    features['hour_sin'] = np.sin(2 * np.pi * dt.hour / 24)
+    features['hour_cos'] = np.cos(2 * np.pi * dt.hour / 24)
+    features['day_sin'] = np.sin(2 * np.pi * features['day_of_year'] / 365)
+    features['day_cos'] = np.cos(2 * np.pi * features['day_of_year'] / 365)
+    
+    return features
+
+
+# =================================================================
+# 輔助函式: OpenAQ V3 數據抓取
 # =================================================================
 
 def get_location_meta(location_id: int):
@@ -270,7 +298,6 @@ def fetch_latest_data_for_prediction(location_id: int, target_params: list, hist
         # 5. 合併最新觀測與歷史特徵 (重點步驟)
         
         # 複製歷史特徵 (包含所有 lag/weather/seasonal features)
-        # to_frame().T 確保它是一個單行 DataFrame
         input_df = historical_data.copy().iloc[0].to_frame().T
         
         # 從歷史數據中移除舊的 datetime 和舊的污染物值
@@ -278,10 +305,18 @@ def fetch_latest_data_for_prediction(location_id: int, target_params: list, hist
         input_df = input_df.drop(columns=['datetime'] + pollutant_value_cols, errors='ignore')
         
         # 將最新抓到的數據（時間和污染物值）合併到 input_df 中
-        # concat 將會把最新的數據作為新的一行
         final_input_df = pd.concat([input_df, current_obs_df], axis=1).iloc[0].to_frame().T
         
-        # 確保 final_input_df 只有需要的欄位 (feature_cols + 'datetime')
+        # >>> FIX: 計算並添加最新的時間特徵
+        if 'datetime' in final_input_df.columns and pd.notna(final_input_df['datetime'].iloc[0]):
+            dt = pd.to_datetime(final_input_df['datetime'].iloc[0])
+            time_features = extract_time_features(dt)
+            
+            # 合併時間特徵到 DataFrame
+            for k, v in time_features.items():
+                final_input_df[k] = v
+
+        # 6. 確保 final_input_df 只有需要的欄位 (feature_cols + 'datetime')
         required_cols = list(FEATURE_COLUMNS) + ['datetime']
         final_input_df = final_input_df.reindex(columns=required_cols, fill_value=np.nan)
 
@@ -294,7 +329,6 @@ def fetch_latest_data_for_prediction(location_id: int, target_params: list, hist
     except Exception as e:
         print(f"❌ [Fetch] 抓取最新資料或合併失敗: {e}")
         return pd.DataFrame()
-
 
 # =================================================================
 # 輔助函式: AQI 計算
@@ -378,26 +412,22 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
     last_datetime_aware = last_data['datetime'].iloc[0]
     # 注意：這裡使用 to_dict() 創建一個可變字典副本作為迭代的基礎
+    # current_data_dict 包含了 $T_{obs}$ 的所有特徵 (Lag, Weather, 以及在 fetch 函式中計算的 Time Features)
     current_data_dict = last_data[feature_cols].iloc[0].to_dict()
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
     has_weather = bool(weather_feature_names)
 
+    # 預測從 $T_{obs} + 1$ 開始
     for h in range(hours):
         future_time = last_datetime_aware + timedelta(hours=h + 1)
-        pred_features = current_data_dict.copy()
+        pred_features = current_data_dict.copy() # 複製當前狀態 (Lag, Weather)
 
-        # 1. 更新時間特徵
-        pred_features['hour'] = future_time.hour
-        pred_features['day_of_week'] = future_time.dayofweek
-        pred_features['month'] = future_time.month
-        pred_features['day_of_year'] = future_time.timetuple().tm_yday # 使用 day_of_year
-        pred_features['is_weekend'] = int(future_time.dayofweek in [5, 6])
-        pred_features['hour_sin'] = np.sin(2 * np.pi * future_time.hour / 24)
-        pred_features['hour_cos'] = np.cos(2 * np.pi * future_time.hour / 24)
-        pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
-        pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
+        # 1. 更新時間特徵 (FIX: 直接使用 helper 函式確保邏輯一致)
+        time_features = extract_time_features(future_time)
+        for k, v in time_features.items():
+            pred_features[k] = v
 
         # 2. 模擬未來天氣變化 (使用前一小時的天氣值進行隨機擾動)
         if has_weather:
@@ -434,7 +464,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
         predictions.append(current_prediction_row)
 
-        # 5. 更新滯後特徵 (遞迴更新)
+        # 5. 更新滯後特徵 (遞迴更新: 用當前預測值填充 Lag_1h，並將其他 Lag 向後移動)
         for param in pollutant_params + ['aqi']:
             # 從最大的 Lag 開始更新，避免覆蓋
             for i in range(len(LAG_HOURS) - 1, 0, -1):
@@ -520,14 +550,13 @@ with app.app_context():
 
 @app.route('/')
 def index():
-    global LAST_OBSERVATION # 允許讀取全域變數
+    global LAST_OBSERVATION 
     city_name = "高雄"
     
     # 檢查模型是否成功載入
     if TRAINED_MODELS and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
         try:
             # 1. 🚨 即時抓取最新觀測數據並與歷史數據合併 🚨
-            # 獲取單行且更新了最新污染物值和時間戳的 DataFrame
             final_input_data = fetch_latest_data_for_prediction(
                 LOCATION_ID,
                 TARGET_PARAMS,
