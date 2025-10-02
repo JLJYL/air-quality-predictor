@@ -31,7 +31,7 @@ API_KEY = "98765df2082f04dc9449e305bc736e93624b66e250fa9dfabcca53b31fc11647"
 HEADERS = {"X-API-Key": API_KEY}
 BASE = "https://api.openaq.org/v3"
 
-LOCATION_ID = 2395624  # 高雄市-前金 (請替換為您需要的站點 ID)
+LOCATION_ID = 2395624 # 高雄市-前金 (請替換為您需要的站點 ID)
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
 PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
 
@@ -269,11 +269,11 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     """計算單一污染物濃度對應的 AQI 子指數 (I)"""
     if pd.isna(concentration) or concentration < 0:
-        return 0
+        return np.nan # 修正: 保持為 np.nan
 
     breakpoints = AQI_BREAKPOINTS.get(param)
     if not breakpoints:
-        return 0
+        return np.nan # 修正: 保持為 np.nan
 
     for C_low, C_high, I_low, I_high in breakpoints:
         if C_low <= concentration <= C_high:
@@ -291,21 +291,23 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
             I = I_high + I_rate * (concentration - C_high)
             return np.round(I)
 
-    return 0
+    return np.nan # 修正: 保持為 np.nan
 
-def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> int:
+def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float: # 修正: 返回類型為 float (為了 np.nan)
     """根據多個污染物濃度計算最終 AQI (取最大子指數)"""
     sub_indices = []
     for p in params:
         col_name = f'{p}_pred' if is_pred else p
-        if col_name in row and not pd.isna(row[col_name]):
+        if col_name in row and pd.notna(row[col_name]): # 使用 pd.notna 檢查
             sub_index = calculate_aqi_sub_index(p, row[col_name])
-            sub_indices.append(sub_index)
+            if pd.notna(sub_index): # 確保子指數是有效數字
+                sub_indices.append(sub_index)
 
     if not sub_indices:
-        return np.nan
+        return np.nan # 保持為 np.nan
 
-    return int(np.max(sub_indices))
+    # 修正: 返回 np.float 類型，讓後續處理更安全
+    return np.max(sub_indices)
 
 
 # =================================================================
@@ -318,7 +320,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
     # 🚨 修正：現在我們信任 index() 傳入的時間是 Naive 的，因此可以直接本地化為 UTC
     last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
-         
+        
     last_datetime_aware = last_data['datetime'].iloc[0]
     
     current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
@@ -358,9 +360,16 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 3. 預測所有污染物
         for param in pollutant_params:
             model = models[param]
-            pred_input = np.array([pred_features[col] for col in feature_cols]).reshape(1, -1)
-            pred = model.predict(pred_input)[0]
-            pred = max(0, pred) 
+            # 確保輸入是模型期望的特徵順序
+            pred_input = np.array([pred_features.get(col) for col in feature_cols]).reshape(1, -1)
+            
+            # 處理輸入中可能存在的 NaN (XGBoost通常可以處理，但為安全起見，可以先檢查)
+            if np.any(np.isnan(pred_input)):
+                 # 如果有重要特徵是 NaN，則跳過預測，將結果設為 NaN
+                 pred = np.nan
+            else:
+                 pred = model.predict(pred_input)[0]
+                 pred = max(0, pred) 
 
             current_prediction_row[f'{param}_pred'] = pred
             new_pollutant_values[param] = pred
@@ -384,7 +393,13 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
-                current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+                # 只有當預測值是有效數字時才更新 lag_1h
+                if pd.notna(new_pollutant_values[param]):
+                    current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+                else:
+                    # 如果當前預測是 NaN，則 lag_1h 應設為 NaN (如果它不是一個必填特徵)
+                    # 為了保持原有的遞迴邏輯，我們保留現狀，依賴模型處理 NaN
+                    pass
 
     return pd.DataFrame(predictions)
 
@@ -474,8 +489,8 @@ def index():
         for col in latest_row.index:
             if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
                  if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
-                    observation_for_prediction[col] = latest_row[col]
-                 
+                     observation_for_prediction[col] = latest_row[col]
+            
         print(f"✅ [Request] 成功整合最新觀測數據 (UTC: {observation_for_prediction['datetime'].iloc[0]})")
         
     # 3. 檢查最終預測數據來源
@@ -506,13 +521,25 @@ def index():
         )
 
         future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-        max_aqi = int(future_predictions['aqi_pred'].max())
+        
+        # --- 核心修正區塊：處理 NaN 值 ---
+        # 確保 aqi_pred 是數字，否則設為 NaN (for max calculation)
+        future_predictions['aqi_pred'] = pd.to_numeric(future_predictions['aqi_pred'], errors='coerce') 
+        
+        # 計算最大 AQI，並將結果安全地轉換為 int 或 "N/A"
+        max_aqi_val = future_predictions['aqi_pred'].max()
+        max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else "N/A"
 
+        # 準備傳遞給 Jinja2 模板的列表，將 NaN 轉換為 "N/A" 字串
         aqi_predictions = [
-            {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': int(item['aqi_pred'])}
+            {
+                'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
+                'aqi': int(item['aqi_pred']) if pd.notna(item['aqi_pred']) else "N/A" # <-- 修正：安全轉換為 int 或 "N/A"
+            }
             for item in future_predictions.to_dict(orient='records')
         ]
-        
+        # --------------------------------
+
     except Exception as e:
         max_aqi = "N/A"
         aqi_predictions = []
