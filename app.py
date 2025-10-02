@@ -1,4 +1,4 @@
-# app.py - 供 Render 部署使用
+# app.py - 供 Render 部署使用 (最終時區修正版)
 
 # =================================================================
 # 導入所有必要的庫 
@@ -316,10 +316,8 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # 🚨 最終修正：在本地化之前，强制移除所有時區資訊，確保它是 Naive 的。
+    # 🚨 極端安全檢查：確保傳入的數據絕對是 Naive 的
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
-    
-    # 强制移除時區資訊
     if last_data['datetime'].dt.tz is not None:
          last_data['datetime'] = last_data['datetime'].dt.tz_localize(None)
 
@@ -397,7 +395,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# 模型載入邏輯 (保持不變)
+# 模型載入邏輯 (修正：載入 LAST_OBSERVATION 時清除時區)
 # =================================================================
 
 def load_models_and_metadata():
@@ -416,6 +414,12 @@ def load_models_and_metadata():
         
         if 'last_observation_json' in metadata:
             LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
+            
+            # 🚨 修正：在模型啟動載入時，就清除 LAST_OBSERVATION 中的時區
+            if 'datetime' in LAST_OBSERVATION.columns:
+                 LAST_OBSERVATION['datetime'] = pd.to_datetime(LAST_OBSERVATION['datetime'])
+                 if LAST_OBSERVATION['datetime'].dt.tz is not None:
+                     LAST_OBSERVATION['datetime'] = LAST_OBSERVATION['datetime'].dt.tz_localize(None)
 
         TRAINED_MODELS = {}
         params_to_remove = []
@@ -472,6 +476,7 @@ def index():
         print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，退回使用模型載入時的數據。")
         observation_for_prediction = LAST_OBSERVATION
     else:
+        # 使用 .copy() 確保我們不會修改 LAST_OBSERVATION 的原始副本
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
 
         latest_row = current_observation_raw.iloc[0]
@@ -490,11 +495,9 @@ def index():
         print("🚨 [Request] 最終預測數據來源為空，無法進行預測。")
         return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
     
-    # 🚨 最終修正：在傳入預測函式前，強制移除所有時區資訊，避免重複本地化錯誤
+    # 🚨 安全修正：在傳入預測函式前，強制移除時區
     try:
-        # 確保是 datetime 類型
         observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-        # 移除時區資訊 (如果它是 tz-aware)
         if observation_for_prediction['datetime'].dt.tz is not None:
              observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None)
         print("✅ [Fix] 已安全清除預測數據中的時區資訊。")
@@ -515,7 +518,7 @@ def index():
         current_data = observation_for_prediction.iloc[0].copy()
         
         # 獲取當前時間和實時 AQI
-        # ⚠️ 注意：這裡的時間需要經過 tz_localize('UTC') 才能 tz_convert(LOCAL_TZ)
+        # 由於 predict_future_multi 內部已經處理並確保時間是 UTC-aware，這裡只需要對當前時間做同樣處理
         current_time_aware_utc = pd.to_datetime(current_data['datetime']).tz_localize('UTC')
         current_time_aware_local = current_time_aware_utc.tz_convert(LOCAL_TZ)
         current_aqi = int(current_data.get('aqi', 0))
@@ -536,15 +539,13 @@ def index():
 
 
         # 格式化最終結果
-        # 最大AQI只計算未來24小時預測值
         max_aqi = int(future_predictions_df['aqi'].max()) 
         
         aqi_predictions = [
             {
                 'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
                 'aqi': int(item['aqi']),
-                # 判斷是否為列表的第一項 (即 current observation)
-                'is_current': idx == 0 
+                'is_current': item.get('is_current', False) if idx == 0 else False
             }
             for idx, item in combined_predictions_df.to_dict(orient='records')
         ]
