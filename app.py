@@ -107,11 +107,26 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     # last_data 現在是單行 DataFrame，需要確保其時間格式和時區設定正確
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
 
-    # 修正時區問題: 如果已是 tz-aware，則轉換為 UTC；否則，將其視為 UTC 來本地化。
+    # 修正時區問題: 確保日期時間為 UTC-aware。
+    # 由於上次的條件檢查在特定情況下失效，導致 tz_localize 仍然在 tz-aware 對象上被呼叫，
+    # 這裡採用更健壯的 try-except 結構來處理 Pandas 內部時區偵測的邊界情況。
     if last_data['datetime'].dt.tz is not None:
+        # 情況 1: 如果已是 tz-aware，則將其轉換為 UTC。
         last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
     else:
-        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+        # 情況 2: 如果是 tz-naive，嘗試本地化為 UTC。
+        try:
+            last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+        except Exception as e:
+            # 捕獲 tz_localize 拋出的 "Already tz-aware" 錯誤。
+            # 這表示 .dt.tz 檢查失效，實際為 tz-aware，此時應使用 tz_convert 修正。
+            if "tz-aware" in str(e):
+                print("⚠️ [TZ Fix] .dt.tz 檢查失效，實際為 tz-aware，使用 tz_convert 修正。")
+                last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
+            else:
+                # 拋出其他未知錯誤
+                raise e
+
 
     last_datetime_aware = last_data['datetime'].iloc[0]
     # 注意：這裡使用 to_dict() 創建一個可變字典副本作為迭代的基礎
