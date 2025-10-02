@@ -13,6 +13,7 @@ import warnings
 import numpy as np
 import xgboost as xgb
 import json # 新增：用於讀取元數據
+import io # 新增：用於讀取 JSON 字串為 DataFrame
 from datetime import timedelta, timezone
 from flask import Flask, render_template
 
@@ -40,7 +41,7 @@ LAG_HOURS = [1, 2, 3, 6, 12, 24] # 預測遞迴需要這些參數
 ROLLING_WINDOWS = [6, 12, 24] # 預測遞迴需要這些參數
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] # 用於 AQI 計算
 
-# 簡化的 AQI 分級表 (已檢查並清理 U+00A0 隱藏字元)
+# 簡化的 AQI 分級表 (已徹底清理 U+00A0 隱藏字元)
 AQI_BREAKPOINTS = {
     "pm25": [(0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150), (55.5, 150.4, 151, 200)],
     "pm10": [(0, 54, 0, 50), (55, 154, 51, 100), (155, 254, 101, 150), (255, 354, 151, 200)],
@@ -147,7 +148,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         for param in pollutant_params:
             model = models[param]
             # 確保輸入特徵的順序與模型訓練時一致
-            # 這裡需要一個小修正: 確保 pred_features 只有 feature_cols 中有的鍵
             pred_input_data = {col: pred_features.get(col, 0) for col in feature_cols}
             pred_input = np.array([pred_input_data[col] for col in feature_cols]).reshape(1, -1)
             pred = model.predict(pred_input)[0]
@@ -203,19 +203,16 @@ def load_models_and_metadata():
 
         POLLUTANT_PARAMS = metadata.get('pollutant_params', [])
         FEATURE_COLUMNS = metadata.get('feature_columns', [])
-        
+
         # 將最後一筆數據的 JSON 轉換回 DataFrame
         if 'last_observation_json' in metadata:
-            # 從 JSON 讀取時，日期會變成字串，之後會在 predict_future_multi 處理
             # 使用 StringIO 模擬檔案讀取，確保格式正確
-            import io
             LAST_OBSERVATION = pd.read_json(io.StringIO(metadata['last_observation_json']), orient='records')
 
         # 2. 載入 XGBoost 模型
         TRAINED_MODELS = {}
-        # 建立一個副本，以便在迭代中安全地刪除找不到模型的參數
-        params_to_check = list(POLLUTANT_PARAMS) 
-        
+        params_to_check = list(POLLUTANT_PARAMS)
+
         for param in params_to_check:
             model_path = os.path.join(MODELS_DIR, f'{param}_model.json')
             if os.path.exists(model_path):
@@ -224,11 +221,10 @@ def load_models_and_metadata():
                 TRAINED_MODELS[param] = model
             else:
                 print(f"❌ [Load] 找不到 {param} 的模型檔案: {model_path}")
-                # 僅在 TRAINED_MODELS 中移除，POLLUTANT_PARAMS 稍後更新
-        
+
         # 最終更新 POLLUTANT_PARAMS，只保留成功載入模型的
         POLLUTANT_PARAMS = list(TRAINED_MODELS.keys())
-        
+
         if TRAINED_MODELS:
             print(f"✅ [Load] 成功載入 {len(TRAINED_MODELS)} 個模型。")
         else:
@@ -254,7 +250,7 @@ with app.app_context():
 @app.route('/')
 def index():
     city_name = "高雄"
-    
+
     # 檢查模型是否成功載入
     if TRAINED_MODELS and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
         try:
@@ -269,23 +265,23 @@ def index():
 
             # 格式化結果
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-            
+
             # 確保 aqi_pred 是數字再取 max
             if not future_predictions.empty and future_predictions['aqi_pred'].dtype in [np.int64, np.float64]:
                  max_aqi = int(future_predictions['aqi_pred'].max())
             else:
                  max_aqi = "N/A"
-                 
+
             aqi_predictions = [
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': int(item['aqi_pred'])}
                 for item in future_predictions.to_dict(orient='records')
             ]
-            
+
         except Exception as e:
             max_aqi = "N/A"
             aqi_predictions = []
             print(f"❌ [Request] 預測執行失敗: {e}")
-            
+
     else:
         max_aqi = "N/A"
         aqi_predictions = []
