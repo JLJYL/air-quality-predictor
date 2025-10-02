@@ -86,48 +86,9 @@
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
             </div>
-            </div>
-
-        <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
-            {% if not is_fallback %}
-                逐小時預測明細
-            {% else %}
-                最新觀測數據
-            {% endif %}
-        </h3>
-        
-        <div id="predictionsList" class="space-y-3 max-h-[60vh] overflow-y-auto scrollbar-hide p-2 bg-white rounded-lg shadow-inner">
-            {% if aqi_predictions %}
-                {% for prediction in aqi_predictions %}
-                <div class="flex justify-between items-center p-4 rounded-lg shadow-sm border border-gray-100 hover:bg-gray-50 transition duration-150">
-                    <span class="text-gray-600 font-medium text-sm md:text-base">
-                        {{ prediction.time }} 
-                        {% if not is_fallback %}
-                            ({{ '現在 +%s 小時' % loop.index }})
-                        {% else %}
-                            <span class="text-blue-500 font-bold">(觀測值)</span>
-                        {% endif %}
-                    </span>
-                    
-                    <div class="flex items-center space-x-3">
-                        <span class="text-gray-700 font-semibold text-base md:text-lg">
-                            AQI:
-                        </span>
-                        <span id="aqi-badge-{{ loop.index }}" class="w-10 h-10 flex items-center justify-center text-white text-base font-bold rounded-full shadow-md transition duration-300 ease-in-out" data-aqi="{{ prediction.aqi }}">
-                            {{ prediction.aqi }}
-                        </span>
-                    </div>
-                </div>
-                {% endfor %}
-            {% else %}
-                <div class="text-center p-10 text-gray-500">
-                    <p class="mb-2 text-xl font-semibold">❌ 數據載入失敗</p>
-                    <p>請確認您的 **models** 資料夾和 **model_meta.json** 檔案是否存在。</p>
-                </div>
-            {% endif %}
         </div>
 
-    </div>
+        </div>
 
     <script>
         function getAqiColorClass(aqi) {
@@ -176,22 +137,8 @@
                 aqiStatusElement.classList.add('text-white');
             }
 
-            document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => {
-                const aqi = badge.getAttribute('data-aqi'); 
-                const parsedAqi = parseInt(aqi);
-
-                // 移除所有顏色類別
-                ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'].forEach(c => {
-                    badge.classList.remove(c);
-                });
-
-                if (aqi === "N/A" || isNaN(parsedAqi)) { 
-                     badge.classList.add('aqi-default');
-                } else {
-                    const colorClass = getAqiColorClass(parsedAqi);
-                    badge.classList.add(colorClass);
-                }
-            });
+            // 因為您刪除了列表，所以不再需要更新清單項目顏色
+            // document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => { ... });
         }
 
         function createAqiChart() {
@@ -305,16 +252,13 @@
                                 },
                                 maxRotation: 45,
                                 minRotation: 45,
-                                // 優化 X 軸刻度顯示，每 6 小時顯示完整日期
                                 callback: function(value, index, values) {
                                     const fullLabel = this.getLabelForValue(value);
-                                    const parts = fullLabel.split(' '); // [MM-DD, HH:MM]
+                                    const parts = fullLabel.split(' '); 
                                     
-                                    // 每 6 個小時顯示完整的日期時間
                                     if (index % 6 === 0) { 
                                         return fullLabel;
                                     }
-                                    // 否則只顯示時間
                                     return parts[1]; 
                                 }
                             },
