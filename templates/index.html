@@ -21,16 +21,6 @@
         .aqi-300 { @apply bg-purple-700; } /* Very Unhealthy */
         .aqi-default { @apply bg-gray-400; }
 
-        /* 根據 AQI 數值返回對應的 Tailwind 類 */
-        function getAqiColorClass(aqi) {
-            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default';
-            if (aqi <= 50) return 'aqi-50';
-            if (aqi <= 100) return 'aqi-100';
-            if (aqi <= 150) return 'aqi-150';
-            if (aqi <= 200) return 'aqi-200';
-            return 'aqi-300';
-        }
-
         /* 讓滾動條隱藏，但仍可滾動 */
         .scrollbar-hide {
             -ms-overflow-style: none;  /* IE and Edge */
@@ -117,6 +107,17 @@
 
     <script>
         // JavaScript 函數用於根據 AQI 數值動態套用顏色
+        
+        /* 根據 AQI 數值返回對應的 Tailwind 類 */
+        function getAqiColorClass(aqi) {
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default';
+            if (aqi <= 50) return 'aqi-50';
+            if (aqi <= 100) return 'aqi-100';
+            if (aqi <= 150) return 'aqi-150';
+            if (aqi <= 200) return 'aqi-200';
+            return 'aqi-300';
+        }
+        
         function updateAqiColors() {
             const maxAqiValue = document.getElementById('maxAqiValue').innerText.trim();
             const aqiStatusElement = document.getElementById('aqiStatus');
