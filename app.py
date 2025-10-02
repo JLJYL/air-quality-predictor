@@ -496,22 +496,76 @@ def index():
         print(f"⚠️ [Fix] 清除時區資訊失敗: {e}")
     
     # 4. 進行預測
+    # app.py (在 index 函式的 try 區塊內)
+
+    # ... (前略：步驟 3. 時區修正完成後) ...
+
+    # 4. 進行預測
     try:
-        future_predictions = predict_future_multi(
+        # 執行未來小時的預測
+        future_predictions_df = predict_future_multi(
             TRAINED_MODELS,
             observation_for_prediction, # 傳入 Naive 時間的數據
             FEATURE_COLUMNS,
             POLLUTANT_PARAMS,
             hours=HOURS_TO_PREDICT
         )
+        
+        # 🚨 修正核心：創建當前觀測值 (t+0) 的數據行
+        current_data = observation_for_prediction.iloc[0].copy()
+        
+        # 獲取當前時間和實時 AQI
+        current_time_aware = pd.to_datetime(current_data['datetime']).tz_localize('UTC').tz_convert(LOCAL_TZ)
+        current_aqi = int(current_data.get('aqi', 0)) # 從實時抓取的數據中獲取 AQI
+        
+        # 格式化當前數據行
+        current_prediction_row = pd.DataFrame([{
+            'datetime': current_time_aware,
+            'aqi_pred': current_aqi,
+            'is_current': True # 添加標記以便在前端顯示 "現在"
+        }])
+        current_prediction_row = current_prediction_row.rename(
+            columns={'datetime': 'datetime_local', 'aqi_pred': 'aqi'}
+        )
+        
+        # 合併當前數據和未來預測數據
+        # 將未來預測 DataFrame 的欄位改名以匹配
+        future_predictions_df = future_predictions_df.rename(columns={'aqi_pred': 'aqi'})
+        
+        # 由於 future_predictions['datetime'] 是 UTC-aware，我們需要將 current_time_aware 轉回 UTC
+        current_prediction_row['datetime'] = current_prediction_row['datetime'].dt.tz_convert('UTC')
+        current_prediction_row = current_prediction_row.drop(columns=['is_current'])
+        
+        # 重計算 future_predictions 的 datetime_local (保持原有邏輯)
+        future_predictions_df['datetime_local'] = future_predictions_df['datetime'].dt.tz_convert(LOCAL_TZ)
 
-        future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-        max_aqi = int(future_predictions['aqi_pred'].max())
+        # 確保當前數據行和預測數據行只有 'datetime', 'aqi', 'datetime_local' 這些欄位
+        current_data_row = {'datetime_local': current_time_aware, 'aqi': current_aqi}
+        
+        # 建立最終的預測列表
+        final_predictions = future_predictions_df[['datetime_local', 'aqi']].copy()
+        
+        # 確保 current_data_row 是一個 Series 或 DataFrame
+        current_df = pd.DataFrame([current_data_row])
+        
+        # 將當前數據添加到列表的開頭
+        combined_predictions_df = pd.concat([current_df, final_predictions], ignore_index=True)
 
+
+        # 格式化最終結果
+        max_aqi = int(future_predictions_df['aqi'].max()) # 最大AQI仍只計算未來小時
+        
         aqi_predictions = [
-            {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': int(item['aqi_pred'])}
-            for item in future_predictions.to_dict(orient='records')
+            {
+                'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
+                'aqi': int(item['aqi']),
+                # 如果是第一行，顯示 '現在' 標籤
+                'is_current': idx == 0 
+            }
+            for idx, item in combined_predictions_df.to_dict(orient='records')
         ]
+        
+    # ... (後略：except 區塊保持不變) ...
         
     except Exception as e:
         max_aqi = "N/A"
