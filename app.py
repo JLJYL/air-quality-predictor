@@ -470,44 +470,64 @@ with app.app_context():
     load_models_and_metadata() 
 
 @app.route('/')
+@app.route('/')
 def index():
     city_name = "高雄"
     
-    # 檢查模型是否成功載入
     if not TRAINED_MODELS or not POLLUTANT_PARAMS:
         print("🚨 [Request] 模型或參數尚未初始化，無法進行預測。")
         return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
     
-    # ⭐⭐⭐ 新增：即時抓取最新觀測數據 ⭐⭐⭐
-    current_observation_df = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
+    # 1. 即時抓取最新觀測數據 (只包含 datetime, co, pm25, aqi 等當前值)
+    current_observation_raw = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
 
-    if current_observation_df.empty or len(current_observation_df) == 0:
-        print("🚨 [Request] 無法取得最新的空氣品質觀測數據。")
-        # ⚠️ 可選：如果抓取失敗，退回到使用 LAST_OBSERVATION 進行預測
+    observation_for_prediction = None
+    
+    # 2. 檢查最新數據是否有效且 LAST_OBSERVATION 存在（用於提供滯後特徵）
+    if current_observation_raw.empty or LAST_OBSERVATION is None or LAST_OBSERVATION.empty:
+        print("🚨 [Request] 無法取得最新觀測數據或模型滯後數據，退回使用模型載入時的數據。")
         observation_for_prediction = LAST_OBSERVATION
     else:
-        observation_for_prediction = current_observation_df
-        print(f"✅ [Request] 成功取得最新觀測數據 (UTC: {observation_for_prediction['datetime'].iloc[0]})")
+        # 3. 核心步驟：將 LAST_OBSERVATION 的結構和滯後特徵複製給最新數據
+        #    a. 複製 LAST_OBSERVATION 的結構，以便包含所有滯後特徵列
+        #       這裡使用 .iloc[:1] 確保是單行 DataFrame
+        observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
 
+        #    b. 將「當前值」替換成 API 抓到的最新數據
+        latest_row = current_observation_raw.iloc[0]
 
+        #       替換時間
+        observation_for_prediction['datetime'] = latest_row['datetime']
+        
+        #       替換當前小時污染物值和 AQI
+        for col in latest_row.index:
+            if col in observation_for_prediction.columns:
+                 # ⚠️ 確保只替換我們抓取到的當前值 (例如 pm25, co, aqi)，
+                 #    而不是替換到 lag_xh 或 rolling_x 欄位，這些欄位應保留舊值。
+                 if col not in FEATURE_COLUMNS or any(s in col for s in ['lag_', 'rolling_']):
+                     # 排除滞后/滾動特徵，只替換原始污染物和天氣值
+                     if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
+                        observation_for_prediction[col] = latest_row[col]
+                 
+        print(f"✅ [Request] 成功整合最新觀測數據 (UTC: {observation_for_prediction['datetime'].iloc[0]})")
+        
+    # 4. 確保 prediction 使用的 DataFrame 是單行且包含所有特徵列
     if observation_for_prediction is None or observation_for_prediction.empty:
-        print("🚨 [Request] 預測數據來源為空，無法進行預測。")
+        print("🚨 [Request] 最終預測數據來源為空，無法進行預測。")
         return render_template('index.html', max_aqi="N/A", aqi_predictions=[], city_name=city_name)
 
-    # 必須確保 observation_for_prediction 包含所有 FEATURE_COLUMNS
-    # 這裡我們信任模型訓練時的邏輯，假設缺失的數據會在模型訓練時被處理成 Nan 或其他預設值
-    
-    # ⭐⭐⭐ 核心預測邏輯 (使用 observation_for_prediction) ⭐⭐⭐
+    # 5. 進行預測
     try:
+        # ... (predict_future_multi 保持不變) ...
         future_predictions = predict_future_multi(
             TRAINED_MODELS,
-            observation_for_prediction, # 使用最新或備用數據
+            observation_for_prediction, # 使用整合了新值的數據
             FEATURE_COLUMNS,
             POLLUTANT_PARAMS,
             hours=HOURS_TO_PREDICT
         )
-
-        # 格式化結果
+        
+        # ... (格式化結果保持不變) ...
         future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
         max_aqi = int(future_predictions['aqi_pred'].max())
 
