@@ -130,8 +130,6 @@
     </div>
 
     <script>
-        // 移除 Chart.register(ChartZoom);
-
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -253,7 +251,7 @@
                         legend: {
                             display: false
                         },
-                        // 移除所有 Zoom 相關配置
+                        // 確保這裡沒有任何 'zoom' 配置
                         
                         tooltip: {
                             backgroundColor: 'rgba(0, 0, 0, 0.8)',
