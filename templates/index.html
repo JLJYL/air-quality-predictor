@@ -5,34 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ city_name }} AQI 預測</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
-        /* 使用 Inter 字體以保持現代感和清晰度 */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #f7f7f9; /* Light grey background */
+            background-color: #f7f7f9;
         }
-        /* 針對不同 AQI 級別定義顏色 */
-        .aqi-50 { @apply bg-green-500; } /* Good */
-        .aqi-100 { @apply bg-yellow-500; } /* Moderate */
-        .aqi-150 { @apply bg-orange-500; } /* Unhealthy for Sensitive Groups */
-        .aqi-200 { @apply bg-red-600; } /* Unhealthy */
-        .aqi-300 { @apply bg-purple-700; } /* Very Unhealthy */
+        .aqi-50 { @apply bg-green-500; }
+        .aqi-100 { @apply bg-yellow-500; }
+        .aqi-150 { @apply bg-orange-500; }
+        .aqi-200 { @apply bg-red-600; }
+        .aqi-300 { @apply bg-purple-700; }
         .aqi-default { @apply bg-gray-400; }
 
-        /* 讓滾動條隱藏，但仍可滾動 */
         .scrollbar-hide {
-            -ms-overflow-style: none;  /* IE and Edge */
-            scrollbar-width: none;  /* Firefox */
+            -ms-overflow-style: none;
+            scrollbar-width: none;
         }
         .scrollbar-hide::-webkit-scrollbar {
-            display: none; /* Chrome, Safari and Opera */
+            display: none;
         }
     </style>
 </head>
 <body class="p-4 md:p-8 min-h-screen">
 
-    <div class="max-w-4xl mx-auto">
+    <div class="max-w-6xl mx-auto">
         
         <header class="text-center mb-10">
             <h1 class="text-4xl md:text-5xl font-extrabold text-gray-900 mb-2">
@@ -46,7 +44,6 @@
             <p class="text-lg text-red-500 font-bold">⚠️ 無法載入模型或進行預測，目前顯示最新觀測數據。</p>
             <p class="text-sm text-gray-600 mt-1">最新觀測時間：{{ current_obs_time }}</p>
             {% endif %}
-            
         </header>
 
         <div id="maxAqiCard" class="shadow-2xl rounded-xl p-6 md:p-8 mb-10 text-white transition duration-500 transform hover:scale-[1.01] flex flex-col md:flex-row justify-between items-center" 
@@ -79,6 +76,20 @@
                 {% else %}
                     非常不健康
                 {% endif %}
+            </div>
+        </div>
+
+        <!-- 新增折線圖區塊 -->
+        <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">
+                {% if not is_fallback %}
+                    AQI 趨勢圖
+                {% else %}
+                    當前 AQI 狀態
+                {% endif %}
+            </h3>
+            <div class="relative" style="height: 400px;">
+                <canvas id="aqiChart"></canvas>
             </div>
         </div>
 
@@ -124,17 +135,31 @@
     </div>
 
     <script>
-        // JavaScript 函數用於根據 AQI 數值動態套用顏色
-        
-        /* 根據 AQI 數值返回對應的 Tailwind 類 */
         function getAqiColorClass(aqi) {
-            // 檢查是否為字串 "N/A" 或無效值
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
             if (aqi <= 100) return 'aqi-100';
             if (aqi <= 150) return 'aqi-150';
             if (aqi <= 200) return 'aqi-200';
             return 'aqi-300';
+        }
+
+        function getAqiColor(aqi) {
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return '#9CA3AF';
+            if (aqi <= 50) return '#10B981';
+            if (aqi <= 100) return '#EAB308';
+            if (aqi <= 150) return '#F97316';
+            if (aqi <= 200) return '#DC2626';
+            return '#7C3AED';
+        }
+
+        function getAqiBackgroundColor(aqi) {
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'rgba(156, 163, 175, 0.1)';
+            if (aqi <= 50) return 'rgba(16, 185, 129, 0.1)';
+            if (aqi <= 100) return 'rgba(234, 179, 8, 0.1)';
+            if (aqi <= 150) return 'rgba(249, 115, 22, 0.1)';
+            if (aqi <= 200) return 'rgba(220, 38, 38, 0.1)';
+            return 'rgba(124, 58, 237, 0.1)';
         }
         
         function updateAqiColors() {
@@ -143,7 +168,6 @@
             
             const parsedAqi = parseInt(maxAqiValue);
 
-            // 更新主卡片狀態標籤顏色
             if (maxAqiValue !== "N/A" && !isNaN(parsedAqi)) {
                 aqiStatusElement.classList.add(getAqiColorClass(parsedAqi)); 
                 aqiStatusElement.classList.add('text-white');
@@ -152,8 +176,6 @@
                 aqiStatusElement.classList.add('text-white');
             }
 
-
-            // 更新列表中的小圓圈顏色
             document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => {
                 const aqi = badge.getAttribute('data-aqi'); 
                 const parsedAqi = parseInt(aqi);
@@ -167,9 +189,133 @@
             });
         }
 
-        // 頁面載入完成後執行
-        window.onload = updateAqiColors;
+        function createAqiChart() {
+            const predictions = {{ aqi_predictions | tojson | safe }};
+            
+            if (!predictions || predictions.length === 0) {
+                return;
+            }
+
+            const labels = predictions.map(p => {
+                const time = p.time.split(' ')[1];
+                return time;
+            });
+
+            const data = predictions.map(p => {
+                const aqi = p.aqi;
+                return (aqi === "N/A" || isNaN(aqi)) ? null : parseInt(aqi);
+            });
+
+            const borderColors = data.map(aqi => getAqiColor(aqi));
+            const backgroundColors = data.map(aqi => getAqiBackgroundColor(aqi));
+
+            const ctx = document.getElementById('aqiChart').getContext('2d');
+            
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'AQI 數值',
+                        data: data,
+                        borderColor: '#3B82F6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        borderWidth: 3,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 5,
+                        pointBackgroundColor: borderColors,
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointHoverRadius: 7,
+                        segment: {
+                            borderColor: ctx => {
+                                const index = ctx.p0DataIndex;
+                                return borderColors[index] || '#3B82F6';
+                            }
+                        }
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            padding: 12,
+                            titleFont: {
+                                size: 14,
+                                weight: 'bold'
+                            },
+                            bodyFont: {
+                                size: 13
+                            },
+                            callbacks: {
+                                label: function(context) {
+                                    const aqi = context.parsed.y;
+                                    let status = '';
+                                    if (aqi <= 50) status = '良好';
+                                    else if (aqi <= 100) status = '普通';
+                                    else if (aqi <= 150) status = '對敏感族群不健康';
+                                    else if (aqi <= 200) status = '不健康';
+                                    else status = '非常不健康';
+                                    return `AQI: ${aqi} (${status})`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            },
+                            ticks: {
+                                font: {
+                                    size: 12
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'AQI 數值',
+                                font: {
+                                    size: 14,
+                                    weight: 'bold'
+                                }
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false
+                            },
+                            ticks: {
+                                font: {
+                                    size: 11
+                                },
+                                maxRotation: 45,
+                                minRotation: 45
+                            },
+                            title: {
+                                display: true,
+                                text: '時間',
+                                font: {
+                                    size: 14,
+                                    weight: 'bold'
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        window.onload = function() {
+            updateAqiColors();
+            createAqiChart();
+        };
     </script>
 </body>
 </html>
-                    
