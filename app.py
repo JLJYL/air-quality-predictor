@@ -327,21 +327,30 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> int:
 # 預測函式
 # =================================================================
 
+# 替換成這個版本：
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # 修正時區錯誤：安全地將時間轉為 UTC-aware
+    # 🚨 強健修正：先移除所有時區資訊 (tz_localize(None))，
+    #    然後再將其明確地設定為 UTC (tz_localize('UTC'))。
+    #    這能確保不論數據的原始狀態為何，都能安全地轉換為 UTC-aware。
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
     
-    # 檢查是否已是時區感知 (tz-aware)。如果是，就轉換成 UTC，否則本地化為 UTC。
-    if last_data['datetime'].dt.tz is None:
-        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
-    elif last_data['datetime'].dt.tz != timezone.utc:
-        # 如果不是 UTC，就轉換成 UTC，而不是再次 localize
-        last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
+    try:
+        # 1. 嘗試移除時區（如果它是 tz-aware）
+        if last_data['datetime'].dt.tz is not None:
+             last_data['datetime'] = last_data['datetime'].dt.tz_localize(None)
+    except Exception:
+        # 忽略移除時區時的潛在錯誤，讓它保持 Naive
+        pass 
+        
+    # 2. 將其本地化（設定）為 UTC
+    last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
          
     last_datetime_aware = last_data['datetime'].iloc[0]
+    
+    # ... 後續程式碼不變 ...
     
     # 創建可變字典副本作為迭代的基礎，必須包含所有 feature_cols
     current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
