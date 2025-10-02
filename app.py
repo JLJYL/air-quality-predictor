@@ -27,7 +27,7 @@ META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
 # OpenAQ API 相關常數
 # =================================================================
 # ⚠️ 請替換成您自己的 API Key
-API_KEY = "78ddf6f35143933d3bd4d0ceb19aa1d4f98ad673bd59aca506956d497b283f51" 
+API_KEY = "98765df2082f04dc9449e305bc736e93624b66e250fa9dfabcca53b31fc11647" 
 HEADERS = {"X-API-Key": API_KEY}
 BASE = "https://api.openaq.org/v3"
 
