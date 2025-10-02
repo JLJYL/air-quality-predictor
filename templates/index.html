@@ -266,26 +266,7 @@
                         legend: {
                             display: false
                         },
-                        // 【修正 1】：啟用並設定 Zoom 插件
-                        zoom: {
-                            pan: {
-                                enabled: true, // 啟用平移 (拖曳)
-                                mode: 'y', // 限制只能垂直平移
-                            },
-                            zoom: {
-                                wheel: {
-                                    enabled: true, // 啟用滑鼠滾輪縮放
-                                    modifierKey: 'alt', // 建議使用 alt/option 鍵配合滾輪
-                                },
-                                drag: {
-                                    enabled: true // 啟用拖曳框選放大
-                                },
-                                mode: 'y'
-                            },
-                            onDoubleClick: ({chart}) => { // 雙擊重置視圖
-                                chart.resetZoom();
-                            }
-                        },
+                        
                         
                         tooltip: {
                             backgroundColor: 'rgba(0, 0, 0, 0.8)',
