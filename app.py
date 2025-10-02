@@ -1,4 +1,4 @@
-# app.py - 供 Render 部署使用
+# app.py - 修正版本 (請替換掉您所有的 app.py 內容)
 
 # =================================================================
 # 導入所有必要的庫 
@@ -269,11 +269,11 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     """計算單一污染物濃度對應的 AQI 子指數 (I)"""
     if pd.isna(concentration) or concentration < 0:
-        return np.nan # 修正: 保持為 np.nan
+        return np.nan
 
     breakpoints = AQI_BREAKPOINTS.get(param)
     if not breakpoints:
-        return np.nan # 修正: 保持為 np.nan
+        return np.nan
 
     for C_low, C_high, I_low, I_high in breakpoints:
         if C_low <= concentration <= C_high:
@@ -291,22 +291,21 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
             I = I_high + I_rate * (concentration - C_high)
             return np.round(I)
 
-    return np.nan # 修正: 保持為 np.nan
+    return np.nan
 
-def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float: # 修正: 返回類型為 float (為了 np.nan)
+def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
     """根據多個污染物濃度計算最終 AQI (取最大子指數)"""
     sub_indices = []
     for p in params:
         col_name = f'{p}_pred' if is_pred else p
-        if col_name in row and pd.notna(row[col_name]): # 使用 pd.notna 檢查
+        if col_name in row and pd.notna(row[col_name]):
             sub_index = calculate_aqi_sub_index(p, row[col_name])
-            if pd.notna(sub_index): # 確保子指數是有效數字
+            if pd.notna(sub_index):
                 sub_indices.append(sub_index)
 
     if not sub_indices:
-        return np.nan # 保持為 np.nan
+        return np.nan
 
-    # 修正: 返回 np.float 類型，讓後續處理更安全
     return np.max(sub_indices)
 
 
@@ -318,7 +317,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
-    # 🚨 修正：現在我們信任 index() 傳入的時間是 Naive 的，因此可以直接本地化為 UTC
     last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
@@ -349,10 +347,16 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             np.random.seed(future_time.hour + future_time.day + 42)
             for w_col in weather_feature_names:
                 base_value = current_data_dict.get(w_col)
-                if base_value is not None and not np.isnan(base_value):
+                if base_value is not None and pd.notna(base_value):
+                    # 簡單地隨機擾動天氣數據，確保有值
                     new_weather_value = base_value + np.random.normal(0, 0.5) 
                     pred_features[w_col] = new_weather_value
                     current_data_dict[w_col] = new_weather_value 
+                else:
+                    # 如果基礎天氣數據就是 NaN，保持為 NaN
+                    pred_features[w_col] = np.nan
+                    current_data_dict[w_col] = np.nan 
+
 
         current_prediction_row = {'datetime': future_time}
         new_pollutant_values = {}
@@ -361,15 +365,12 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         for param in pollutant_params:
             model = models[param]
             # 確保輸入是模型期望的特徵順序
-            pred_input = np.array([pred_features.get(col) for col in feature_cols]).reshape(1, -1)
+            pred_input_list = [pred_features.get(col) for col in feature_cols]
+            pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
             
-            # 處理輸入中可能存在的 NaN (XGBoost通常可以處理，但為安全起見，可以先檢查)
-            if np.any(np.isnan(pred_input)):
-                 # 如果有重要特徵是 NaN，則跳過預測，將結果設為 NaN
-                 pred = np.nan
-            else:
-                 pred = model.predict(pred_input)[0]
-                 pred = max(0, pred) 
+            # 使用 XGBoost 的缺失值處理功能，將 NaN 傳遞給模型 (XGBoost 預設處理)
+            pred = model.predict(pred_input)[0]
+            pred = max(0, pred) 
 
             current_prediction_row[f'{param}_pred'] = pred
             new_pollutant_values[param] = pred
@@ -393,19 +394,14 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
-                # 只有當預測值是有效數字時才更新 lag_1h
-                if pd.notna(new_pollutant_values[param]):
-                    current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
-                else:
-                    # 如果當前預測是 NaN，則 lag_1h 應設為 NaN (如果它不是一個必填特徵)
-                    # 為了保持原有的遞迴邏輯，我們保留現狀，依賴模型處理 NaN
-                    pass
+                # 無論是有效數值或 NaN，都將其作為下一個時間點的 lag_1h 特徵
+                current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
 
     return pd.DataFrame(predictions)
 
 
 # =================================================================
-# 模型載入邏輯
+# 模型載入邏輯 (略)
 # =================================================================
 
 def load_models_and_metadata():
@@ -500,14 +496,11 @@ def index():
     
     # 🚨 最終修正：在傳入預測函式前，強制移除所有時區資訊，避免重複本地化錯誤
     try:
-        # 確保是 datetime 類型
         observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-        # 移除時區資訊
         if observation_for_prediction['datetime'].dt.tz is not None:
              observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None)
         print("✅ [Fix] 已安全清除預測數據中的時區資訊。")
     except Exception as e:
-        # 如果失敗，記錄錯誤但仍然嘗試繼續預測
         print(f"⚠️ [Fix] 清除時區資訊失敗: {e}")
     
     # 4. 進行預測
@@ -523,20 +516,30 @@ def index():
         future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
         
         # --- 核心修正區塊：處理 NaN 值 ---
-        # 確保 aqi_pred 是數字，否則設為 NaN (for max calculation)
-        future_predictions['aqi_pred'] = pd.to_numeric(future_predictions['aqi_pred'], errors='coerce') 
+        # 1. 確保 aqi_pred 欄位中的 np.nan 轉換為字串 "N/A"
+        # 2. .astype(object) 讓混合了 int/float/str 的資料安全轉換為 Python 類型
         
-        # 計算最大 AQI，並將結果安全地轉換為 int 或 "N/A"
+        # 計算最大 AQI
         max_aqi_val = future_predictions['aqi_pred'].max()
         max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else "N/A"
 
-        # 準備傳遞給 Jinja2 模板的列表，將 NaN 轉換為 "N/A" 字串
+        # 準備傳遞給 Jinja2 模板的列表
+        predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
+        
+        # 將 NaN 替換為字串 "N/A"
+        predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
+        
+        # 將有效的數字轉換為整數 (但如果是 "N/A" 則保持字串)
+        predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
+             lambda x: int(x) if x != "N/A" else "N/A"
+        ).astype(object) # 使用 object 類型來儲存混合的 int 和 str
+
         aqi_predictions = [
             {
                 'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 
-                'aqi': int(item['aqi_pred']) if pd.notna(item['aqi_pred']) else "N/A" # <-- 修正：安全轉換為 int 或 "N/A"
+                'aqi': item['aqi'] # 直接使用已經清理和轉換的欄位
             }
-            for item in future_predictions.to_dict(orient='records')
+            for item in predictions_df.to_dict(orient='records')
         ]
         # --------------------------------
 
