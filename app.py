@@ -28,19 +28,19 @@ POLLUTANT_PARAMS = [] # 實際找到並訓練的模型參數
 HOURS_TO_PREDICT = 24
 
 # =================================================================
-# 常數設定
+# 常數設定 (重點優化區域)
 # =================================================================
 API_KEY = "68af34aea77a19aa1137ee5fd9b287229ccf23a686309b4521924a04963ac663"
 API_BASE_URL = "https://api.openaq.org/v3/"
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"]
 LOCAL_TZ = "Asia/Taipei"
-MIN_DATA_THRESHOLD = 100
-LAG_HOURS = [1, 2, 3, 6, 12, 24]
-ROLLING_WINDOWS = [6, 12, 24]
-DAYS_TO_FETCH = 7 # 為了加速啟動，我們將天數減少到 7 天
+MIN_DATA_THRESHOLD = 50 # 減少最低數據需求
+LAG_HOURS = [1, 2, 3, 6, 12] # 減少 Lag 特徵
+ROLLING_WINDOWS = [6, 12] # 減少滾動窗口特徵
+DAYS_TO_FETCH = 3 # <<-- 關鍵調整：從 7 天減少到 3 天 (大幅降低數據量和記憶體)
 
-# 模型訓練參數：為了加快 Render 啟動速度，減少 N_ESTIMATORS
-N_ESTIMATORS = 75 # 從 150 減少到 75
+# 模型訓練參數：極限優化速度
+N_ESTIMATORS = 40 # <<-- 關鍵調整：從 75 減少到 40 (大幅降低計算強度和記憶體)
 
 # 簡化的 AQI 分級表 (基於小時值和 US EPA 標準的常用數值)
 AQI_BREAKPOINTS = {
@@ -53,7 +53,7 @@ AQI_BREAKPOINTS = {
 }
 
 # =================================================================
-# 輔助函式: AQI 計算
+# 輔助函式: AQI 計算 (未修改)
 # =================================================================
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
@@ -98,7 +98,7 @@ def calculate_aqi(row: pd.Series, params: list) -> int:
     return int(np.max(sub_indices))
 
 # =================================================================
-# OpenAQ V3 數據爬取/輔助函式
+# OpenAQ V3 數據爬取/輔助函式 (未修改)
 # =================================================================
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/:"*?<>|]+', '_', name)
@@ -250,7 +250,7 @@ def get_all_target_data(station_id, target_params, days_to_fetch):
 
 
 # =================================================================
-# Meteostat 天氣爬蟲類
+# Meteostat 天氣爬蟲類 (未修改)
 # =================================================================
 class WeatherCrawler:
     """Meteostat 小時級天氣數據爬蟲與整合"""
@@ -316,7 +316,7 @@ class WeatherCrawler:
 
 
 # =================================================================
-# 預測函式
+# 預測函式 (未修改)
 # =================================================================
 
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
@@ -417,6 +417,7 @@ def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
         print("🔥 [Init] 開始執行 AQI 預測初始化流程...")
         
         # 1. 數據收集
+        # 使用 DAYS_TO_FETCH=3 呼叫
         station = get_nearest_station(lat, lon, days=days_to_fetch) 
 
         if not station:
@@ -425,6 +426,7 @@ def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
             found_target_params = POLLUTANT_TARGETS
         else:
             print(f"✅ [Init] 找到測站: {station['name']} ({station['id']})")
+            # 使用 DAYS_TO_FETCH=3 呼叫
             df_raw, found_target_params = get_all_target_data(station["id"], POLLUTANT_TARGETS, days_to_fetch)
 
             if df_raw.empty or len(df_raw) < MIN_DATA_THRESHOLD:
@@ -476,11 +478,13 @@ def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
 
         for col_name in feature_base_cols:
             param = col_name.replace('_value', '')
-            for lag in LAG_HOURS:
+            # 使用減少後的 LAG_HOURS
+            for lag in LAG_HOURS: 
                 df[f'{param}_lag_{lag}h'] = df[col_name].shift(lag)
             
             if 'aqi' not in param:
-                for window in ROLLING_WINDOWS:
+                # 使用減少後的 ROLLING_WINDOWS
+                for window in ROLLING_WINDOWS: 
                     df[f'{param}_rolling_mean_{window}h'] = df[col_name].rolling(window=window, min_periods=1).mean()
                     df[f'{param}_rolling_std_{window}h'] = df[col_name].rolling(window=window, min_periods=1).std()
         
@@ -511,12 +515,12 @@ def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
         X_train = X[:split_idx]
         Y_train = {param: Y[param][:split_idx] for param in POLLUTANT_PARAMS}
 
-        print(f"⏳ [Init] 開始訓練 {len(POLLUTANT_PARAMS)} 個 XGBoost 模型 (N={N_ESTIMATORS})...") # 記錄新的 N_ESTIMATORS
+        # 核心訓練步驟
+        print(f"⏳ [Init] 開始訓練 {len(POLLUTANT_PARAMS)} 個 XGBoost 模型 (N={N_ESTIMATORS})...")
         for param in POLLUTANT_PARAMS:
             xgb_model = xgb.XGBRegressor(
-                n_estimators=N_ESTIMATORS, max_depth=7, learning_rate=0.08, random_state=42, n_jobs=-1 # 使用新的 N_ESTIMATORS
+                n_estimators=N_ESTIMATORS, max_depth=7, learning_rate=0.08, random_state=42, n_jobs=-1 # 使用新的 N_ESTIMATORS=40
             )
-            # 這是之前超時的地方，現在只在應用啟動時執行一次
             xgb_model.fit(X_train, Y_train[param]) 
             TRAINED_MODELS[param] = xgb_model
         print("✅ [Init] 模型訓練完成，應用程式準備就緒。")
@@ -537,7 +541,7 @@ app = Flask(__name__)
 with app.app_context():
     # 高雄市中心經緯度
     LAT, LON = 22.6273, 120.3014
-    # 在此呼叫一次耗時的初始化函式
+    # 在此呼叫一次耗時的初始化函式 (使用 DAYS_TO_FETCH=3)
     initialize_app_data(LAT, LON, DAYS_TO_FETCH) 
 
 @app.route('/')
