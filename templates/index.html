@@ -1,19 +1,20 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ city_name }} AQI 預測</title>
+    <title>{{ city_name }} AQI Forecast</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         body { font-family: sans-serif; background-color: #f7f7ff; }
-        .aqi-50 { background-color: #10B981; } /* 綠 */
-        .aqi-100 { background-color: #EAB308; } /* 黃 */
-        .aqi-150 { background-color: #F97316; } /* 橘 */
-        .aqi-200 { background-color: #DC2626; } /* 紅 */
-        .aqi-300 { background-color: #7C3AED; } /* 紫 */
+        /* Tailwind classes for color mapping */
+        .aqi-50 { background-color: #10B981; } /* Green */
+        .aqi-100 { background-color: #EAB308; } /* Yellow */
+        .aqi-150 { background-color: #F97316; } /* Orange */
+        .aqi-200 { background-color: #DC2626; } /* Red */
+        .aqi-300 { background-color: #7C3AED; } /* Purple */
     </style>
 </head>
 <body class="p-8 min-h-screen">
@@ -22,9 +23,9 @@
         
         <header class="text-center mb-10">
             <h1 class="text-4xl font-extrabold text-gray-900 mb-2">
-                {{ city_name }} 空氣品質預測
+                Air Quality Forecast for {{ city_name }} Station
             </h1>
-            <p class="text-lg text-gray-600">未來 24 小時 AQI 趨勢</p>
+            <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
         </header>
 
         <div id="maxAqiCard" class="shadow-2xl rounded-xl p-8 mb-10 text-white flex justify-between items-center" 
@@ -32,7 +33,7 @@
             
             <div>
                 <p class="text-lg font-medium opacity-80">
-                    未來 24 小時內最大預測 AQI
+                    Maximum Predicted AQI in the next 24 hours
                 </p>
                 <h2 id="maxAqiValue" class="text-7xl font-black mt-1">
                     {{ max_aqi }}
@@ -43,41 +44,50 @@
                 {% if max_aqi == "N/A" %}
                     N/A
                 {% elif max_aqi | int <= 50 %}
-                    良好
+                    Good
                 {% elif max_aqi | int <= 100 %}
-                    普通
+                    Moderate
                 {% elif max_aqi | int <= 150 %}
-                    對敏感族群不健康
+                    Unhealthy for Sensitive Groups
                 {% elif max_aqi | int <= 200 %}
-                    不健康
+                    Unhealthy
                 {% else %}
-                    非常不健康
+                    Very Unhealthy
                 {% endif %}
             </div>
         </div>
 
         <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">
-                AQI 趨勢圖
+                AQI Trend Chart
             </h3>
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
             </div>
+            
+            {% if is_fallback %}
+            <p class="mt-4 text-sm text-gray-500 text-center">
+                *Prediction models are unavailable or failed. Displaying the **Latest Observed AQI** ({{ current_obs_time }}).
+            </p>
+            {% else %}
+            <p class="mt-4 text-sm text-gray-500 text-center">
+                *The line shows the forecast. Current data from {{ current_obs_time }} is used as the starting point.
+            </p>
+            {% endif %}
         </div>
         
     </div> 
     
     <script>
-        // --- 1. 數據變數安全傳輸與解析 (極簡版安全處理) ---
+        // --- 1. Data Variable Transfer and Parsing ---
         let predictions = [];
         try {
-            // 注意：如果您的 Flask 傳輸數據有問題，這裡仍可能是錯誤點
             const aqi_predictions_json = '{{ aqi_predictions | tojson | safe }}';
             if (aqi_predictions_json && aqi_predictions_json !== 'null' && aqi_predictions_json !== 'None') {
                 predictions = JSON.parse(aqi_predictions_json);
             }
         } catch (e) {
-            console.error("AQI 數據解析失敗:", e); 
+            console.error("AQI data parsing failed:", e); 
         }
         // --------------------------------------------------------
 
@@ -90,7 +100,7 @@
             return '#7C3AED'; 
         }
         
-        // 更新頂部卡片的顏色 (使用內聯樣式，更穩定)
+        // Updates the color of the top card
         function updateAqiColors() {
             const aqiStatusElement = document.getElementById('aqiStatus');
             const maxAqiValue = parseInt(document.getElementById('maxAqiValue').innerText.trim());
@@ -103,9 +113,9 @@
                 else if (maxAqiValue <= 200) colorClass = 'aqi-200';
                 else colorClass = 'aqi-300';
             }
-            // 移除舊類別，新增新類別 (使用 Tailwind CSS 顏色定義)
+            // Remove old background classes and add the new one
             aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('bg-')).join(' ');
-            aqiStatusElement.classList.add(colorClass.replace('@apply bg-', ''));
+            aqiStatusElement.classList.add(colorClass);
         }
 
         function createAqiChart() {
@@ -115,6 +125,7 @@
 
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); 
+                // Display only MM-DD HH:MM
                 return `${parts[0].substring(5)} ${parts[1]}`; 
             });
 
@@ -123,14 +134,13 @@
                 return (aqi === "N/A" || isNaN(aqi) || aqi === null) ? null : parseInt(aqi);
             });
             
-            // 新增：處理觀測值與預測值的資料集
             let datasets = [];
             const isFallback = predictions.length === 1 && predictions[0].is_obs;
 
             if (isFallback) {
-                // 回退模式：只顯示一個觀測點
+                // Fallback mode: Display a single observation point
                 datasets.push({
-                    label: '最新觀測 AQI',
+                    label: 'Latest Observed AQI',
                     data: data,
                     borderColor: '#9CA3AF',
                     backgroundColor: 'rgba(156, 163, 175, 0.5)',
@@ -138,13 +148,13 @@
                     pointRadius: 8,
                     pointBackgroundColor: getAqiColor(data[0]),
                     pointBorderColor: '#fff',
-                    type: 'bubble' // 使用氣泡圖標記觀測點
+                    type: 'line', // Use line type with a single point
                 });
             } else {
-                // 預測模式：線圖
+                // Prediction mode: Line chart
                 const borderColors = data.map(aqi => getAqiColor(aqi));
                 datasets.push({
-                    label: '預測 AQI 數值',
+                    label: 'Predicted AQI Value',
                     data: data,
                     borderColor: '#3B82F6',
                     backgroundColor: 'rgba(59, 130, 246, 0.1)',
@@ -160,7 +170,7 @@
             const ctx = document.getElementById('aqiChart').getContext('2d');
             
             new Chart(ctx, {
-                type: 'line', // 即使回退模式也使用 line 來保持 x 軸標籤一致
+                type: 'line', 
                 data: {
                     labels: labels,
                     datasets: datasets
@@ -172,10 +182,10 @@
                     scales: {
                         y: { 
                             beginAtZero: true, 
-                            max: 200, // 設一個較保守的上限
+                            max: 200, 
                             ticks: {
                                 callback: function(value) {
-                                    return (value <= 200) ? value : null; // 超過 200 不顯示刻度
+                                    return (value <= 200) ? value : null; 
                                 }
                             }
                         },
@@ -185,28 +195,23 @@
                                 callback: function(value, index) {
                                     const fullLabel = this.getLabelForValue(value);
                                     const parts = fullLabel.split(' ');
+                                    // Show the full label every 6 hours, otherwise just the time
                                     return (index % 6 === 0) ? fullLabel : parts[1]; 
                                 }
                             }
                         }
                     },
-                    // 新增 Tooltip 回呼函式以顯示是否為觀測值
-                    tooltips: {
-                        callbacks: {
-                            title: function(tooltipItems, data) {
-                                const index = tooltipItems[0].dataIndex;
-                                if (predictions[index] && predictions[index].is_obs) {
-                                    return '【最新觀測】';
+                    // Custom Tooltip for Observation marker
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems, data) {
+                                    const index = tooltipItems[0].dataIndex;
+                                    if (predictions[index] && predictions[index].is_obs) {
+                                        return '【LATEST OBSERVATION】';
+                                    }
+                                    return 'Forecast';
                                 }
-                                return '預測';
-                            },
-                            label: function(tooltipItem, data) {
-                                let label = data.datasets[tooltipItem.datasetIndex].label || '';
-                                if (label) {
-                                    label += ': ';
-                                }
-                                label += tooltipItem.yLabel;
-                                return label;
                             }
                         }
                     }
