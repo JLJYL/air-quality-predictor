@@ -1,3 +1,5 @@
+# app.py - 供 Render 部署使用 (已移除耗時的訓練邏輯)
+
 # =================================================================
 # 導入所有必要的庫
 # =================================================================
@@ -10,16 +12,19 @@ import os
 import warnings
 import numpy as np
 import xgboost as xgb
+import json # 新增：用於讀取元數據
 from datetime import timedelta, timezone
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from meteostat import Point, Hourly, units
 from flask import Flask, render_template
 
 # 忽略警告
 warnings.filterwarnings('ignore')
 
+# 模型與元數據路徑
+MODELS_DIR = 'models'
+META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
+
 # =================================================================
-# 全域變數 - 僅在應用程式啟動時設定一次
+# 全域變數 - 改為從檔案載入
 # =================================================================
 TRAINED_MODELS = {} 
 LAST_OBSERVATION = None 
@@ -28,20 +33,12 @@ POLLUTANT_PARAMS = [] # 實際找到並訓練的模型參數
 HOURS_TO_PREDICT = 24
 
 # =================================================================
-# 常數設定 (極限優化區域)
+# 常數設定 (僅保留與預測相關的常數)
 # =================================================================
-API_KEY = "68af34aea77a19aa1137ee5fd9b287229ccf23a686309b4521924a04963ac663"
-API_BASE_URL = "https://api.openaq.org/v3/"
-POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"]
 LOCAL_TZ = "Asia/Taipei"
-MIN_DATA_THRESHOLD = 50 
-LAG_HOURS = [1, 2, 3, 6, 12] # 保留基本滯後特徵
-# ROLLING_WINDOWS = [6, 12] # <-- 刪除滾動窗口特徵以降低計算複雜度
-DAYS_TO_FETCH = 2 # <<-- 關鍵調整：從 3 天減少到 2 天 (數據量最小化)
-
-# 模型訓練參數：極限優化速度
-N_ESTIMATORS = 20 # <<-- 關鍵調整：從 40 減少到 20 (訓練時間最小化)
-MAX_DEPTH = 5 # <<-- 新增調整：從 7 減少到 5 (模型深度最小化)
+LAG_HOURS = [1, 2, 3, 6, 12, 24] # 預測遞迴需要這些參數
+ROLLING_WINDOWS = [6, 12, 24] # 預測遞迴需要這些參數
+POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] # 用於 AQI 計算
 
 # 簡化的 AQI 分級表 (基於小時值和 US EPA 標準的常用數值)
 AQI_BREAKPOINTS = {
@@ -54,7 +51,7 @@ AQI_BREAKPOINTS = {
 }
 
 # =================================================================
-# 輔助函式: AQI 計算 (未修改)
+# 輔助函式: AQI 計算 (從原 app.py 複製過來，必須保留)
 # =================================================================
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
@@ -99,232 +96,15 @@ def calculate_aqi(row: pd.Series, params: list) -> int:
     return int(np.max(sub_indices))
 
 # =================================================================
-# OpenAQ V3 數據爬取/輔助函式 (未修改)
-# =================================================================
-def sanitize_filename(name: str) -> str:
-    return re.sub(r'[\\/:"*?<>|]+', '_', name)
-
-def get_nearest_station(lat, lon, radius=20000, limit=50, days=7):
-    """ 找離 (lat,lon) 最近且最近 days 內有更新的測站 """
-    url = f"{API_BASE_URL}locations"
-    headers = {"X-API-Key": API_KEY}
-    params = {"coordinates": f"{lat},{lon}", "radius": radius, "limit": limit}
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        j = resp.json()
-    except Exception as e:
-        print(f"Error fetching nearest station: {e}")
-        return None
-
-    if "results" not in j or not j["results"]:
-        return None
-
-    df = pd.json_normalize(j["results"])
-    if "datetimeLast.utc" not in df.columns:
-        return None
-
-    df["datetimeLast.utc"] = pd.to_datetime(df["datetimeLast.utc"], errors="coerce", utc=True)
-    now = pd.Timestamp.utcnow()
-    cutoff = now - pd.Timedelta(days=days)
-    df = df[(df["datetimeLast.utc"] >= cutoff) & (df["datetimeLast.utc"] <= now)]
-    if df.empty:
-        return None
-
-    nearest = df.sort_values("distance").iloc[0]
-    return nearest.to_dict()
-
-def get_station_sensors(station_id):
-    """ 使用 /locations/{id}/sensors 取得 sensors 列表 """
-    url = f"{API_BASE_URL}locations/{station_id}/sensors"
-    headers = {"X-API-Key": API_KEY}
-    try:
-        resp = requests.get(url, headers=headers, params={"limit":1000})
-        resp.raise_for_status()
-        j = resp.json()
-        return j.get("results", [])
-    except Exception as e:
-        print(f"Error fetching sensors: {e}")
-        return []
-
-def _extract_datetime_from_measurement(item: dict):
-    """ 嘗試從 measurement 物件抽出時間字串 """
-    candidates = [("period", "datetimeFrom", "utc"), ("date", "utc"), ("datetime",)]
-    for path in candidates:
-        cur = item
-        ok = True
-        for k in path:
-            if isinstance(cur, dict) and k in cur:
-                cur = cur[k]
-            else:
-                ok = False
-                break
-        if ok and cur:
-            return cur
-    return None
-
-def fetch_sensor_data(sensor_id, param_name, limit=500, days=7):
-    """ 擷取 sensor 的時間序列 """
-    url = f"{API_BASE_URL}sensors/{sensor_id}/measurements"
-    headers = {"X-API-Key": API_KEY}
-    now = datetime.datetime.now(datetime.timezone.utc)
-    date_from = (now - datetime.timedelta(days=days)).isoformat().replace("+00:00", "Z")
-    params = {"limit": limit, "date_from": date_from}
-
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        j = resp.json()
-        results = j.get("results", [])
-    except Exception as e:
-        print(f"❌ 抓取 {param_name} 數據失敗: {e}")
-        return pd.DataFrame()
-
-    rows = []
-    for r in results:
-        dt_str = _extract_datetime_from_measurement(r)
-        try:
-            ts = pd.to_datetime(dt_str, utc=True)
-        except Exception:
-            ts = pd.NaT
-        rows.append({"datetime": ts, param_name: r.get("value")})
-
-    df = pd.DataFrame(rows).dropna(subset=["datetime"])
-    if df.empty:
-        return pd.DataFrame()
-    df = df.sort_values("datetime", ascending=False).drop_duplicates(subset=["datetime"])
-    return df
-
-def generate_fake_data(limit=10, params=POLLUTANT_TARGETS):
-    """生成所有目標污染物 (含 AQI) 的模擬數據"""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    base_rows = []
-    for i in range(limit):
-        dt = now - datetime.timedelta(minutes=i*60)
-        row = {'datetime': dt}
-
-        for param in params:
-            if param in ["pm25", "pm10"]: value = round(random.uniform(10, 60), 1)
-            elif param == "o3": value = round(random.uniform(20, 100), 1)
-            elif param in ["no2", "so2"]: value = round(random.uniform(1, 40), 1)
-            elif param == 'co': value = round(random.uniform(0.1, 5), 1)
-            row[f'{param}_value'] = value
-
-          # 注意：此處模擬數據中未包含天氣特徵，實際運行時會嘗試抓取 Meteostat 數據
-        row['temperature'] = round(random.uniform(15, 30), 1)
-        row['humidity'] = round(random.uniform(50, 95), 1)
-        row['pressure'] = round(random.uniform(1000, 1020), 1)
-
-        aqi_val = calculate_aqi(pd.Series(row), params)
-        row['aqi_value'] = aqi_val
-        base_rows.append(row)
-
-    df = pd.DataFrame(base_rows)
-    df['datetime'] = df['datetime'].dt.tz_localize('UTC')
-    return df
-
-def get_all_target_data(station_id, target_params, days_to_fetch):
-    """獲取所有目標污染物數據並合併"""
-    sensors = get_station_sensors(station_id)
-    sensor_map = {s.get("parameter", {}).get("name", "").lower(): s.get("id") for s in sensors}
-
-    all_dfs = []
-    found_params = []
-
-    for param in target_params:
-        sensor_id = sensor_map.get(param)
-        if sensor_id:
-            # 使用 DAYS_TO_FETCH=2 呼叫
-            df_param = fetch_sensor_data(sensor_id, param, days=days_to_fetch)
-            if not df_param.empty:
-                df_param.rename(columns={param: f'{param}_value'}, inplace=True)
-                all_dfs.append(df_param)
-                found_params.append(param)
-
-    if not all_dfs:
-        return pd.DataFrame(), []
-
-    merged_df = all_dfs[0]
-    for i in range(1, len(all_dfs)):
-        merged_df = pd.merge(merged_df, all_dfs[i], on='datetime', how='outer')
-
-    return merged_df, found_params
-
-
-# =================================================================
-# Meteostat 天氣爬蟲類 (未修改)
-# =================================================================
-class WeatherCrawler:
-    """Meteostat 小時級天氣數據爬蟲與整合"""
-
-    def __init__(self, lat, lon):
-        self.point = Point(lat, lon)
-        self.weather_cols = {
-            'temp': 'temperature',
-            'rhum': 'humidity',
-            'pres': 'pressure',
-        }
-
-    def fetch_and_merge_weather(self, air_quality_df: pd.DataFrame):
-        """根據空氣品質數據的時間範圍，從 Meteostat 獲取小時級天氣數據並合併。"""
-        if air_quality_df.empty:
-            return air_quality_df
-
-        if air_quality_df['datetime'].dt.tz is None:
-             air_quality_df['datetime'] = air_quality_df['datetime'].dt.tz_localize('UTC')
-
-        start_time_utc_aware = air_quality_df['datetime'].min()
-        end_time_utc_aware = air_quality_df['datetime'].max()
-
-        # Meteostat 期望無時區的 datetime 物件
-        start_dt = start_time_utc_aware.tz_convert(None).to_pydatetime()
-        end_dt = end_time_utc_aware.tz_convert(None).to_pydatetime()
-
-        try:
-            data = Hourly(self.point, start_dt, end_dt)
-            weather_data = data.fetch()
-        except Exception as e:
-            print(f"❌ 抓取 Meteostat 數據失敗: {e}")
-            weather_data = pd.DataFrame()
-
-        if weather_data.empty:
-            # 如果抓取失敗，則填充 NaN
-            empty_weather = pd.DataFrame({'datetime': air_quality_df['datetime'].unique()})
-            for col in self.weather_cols.values():
-                empty_weather[col] = np.nan
-            return pd.merge(air_quality_df, empty_weather, on='datetime', how='left')
-
-        weather_data = weather_data.reset_index()
-        weather_data.rename(columns={'time': 'datetime'}, inplace=True)
-        weather_data = weather_data.rename(columns=self.weather_cols)
-        weather_data = weather_data[list(self.weather_cols.values()) + ['datetime']]
-        weather_data['datetime'] = weather_data['datetime'].dt.tz_localize('UTC')
-
-        merged_df = pd.merge(
-            air_quality_df,
-            weather_data,
-            on='datetime',
-            how='left'
-        )
-
-        weather_cols_list = list(self.weather_cols.values())
-        # 使用 ffill/bfill 處理缺失天氣數據
-        merged_df[weather_cols_list] = merged_df[weather_cols_list].fillna(method='ffill').fillna(method='bfill')
-
-        return merged_df
-
-    def get_weather_feature_names(self):
-        return list(self.weather_cols.values())
-
-
-# =================================================================
-# 預測函式 (未修改)
+# 預測函式 (從原 app.py 複製過來，必須保留)
 # =================================================================
 
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """預測未來 N 小時的多個目標污染物 (遞迴預測) 並計算 AQI"""
     predictions = []
 
+    # last_data 現在是單行 DataFrame，需要先轉換時間格式
+    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
     last_datetime_aware = last_data['datetime'].iloc[0]
     # 注意：這裡使用 to_dict() 創建一個可變字典副本作為迭代的基礎
     current_data_dict = last_data[feature_cols].iloc[0].to_dict() 
@@ -381,7 +161,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
         predictions.append(current_prediction_row)
 
-        # 5. 更新滯後特徵 (遞迴預測的核心)
+        # 5. 更新滯後特徵 (用當前預測值填充 Lag_1h，並將其他 Lag 向後移動)
         for param in pollutant_params + ['aqi']:
             # 從最大的 Lag 開始更新，避免覆蓋
             for i in range(len(LAG_HOURS) - 1, 0, -1):
@@ -396,131 +176,56 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             # 更新 1 小時滯後特徵為當前預測值
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                 current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+
+        # 6. 滾動平均/標準差特徵無法在遞迴中準確更新，這裡保持省略
         
     return pd.DataFrame(predictions)
 
 
 # =================================================================
-# 應用程式啟動初始化 (只執行一次)
+# 模型載入邏輯 (取代 initialize_app_data)
 # =================================================================
 
-def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
-    """
-    執行空氣品質預測的整個流程，並將訓練結果儲存到全域變數中。
-    此函數只在 Flask 啟動時執行一次，避免 worker timeout。
-    """
+def load_models_and_metadata():
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
-    
-    weather = WeatherCrawler(lat, lon)
-    
+
+    if not os.path.exists(META_PATH):
+        print("🚨 [Load] 找不到模型元數據檔案 (model_meta.json)，無法載入模型。")
+        return
+
     try:
-        print("🔥 [Init] 開始執行 AQI 預測初始化流程...")
+        # 1. 載入元數據
+        with open(META_PATH, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+
+        POLLUTANT_PARAMS = metadata.get('pollutant_params', [])
+        FEATURE_COLUMNS = metadata.get('feature_columns', [])
         
-        # 1. 數據收集 (使用 DAYS_TO_FETCH=2)
-        station = get_nearest_station(lat, lon, days=days_to_fetch) 
+        # 將最後一筆數據的 JSON 轉換回 DataFrame
+        if 'last_observation_json' in metadata:
+            # 從 JSON 讀取時，日期會變成字串，之後會在 predict_future_multi 處理
+            LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
 
-        if not station:
-            print("🚨 [Init] 未找到活躍測站，使用模擬數據。")
-            df = generate_fake_data(limit=days_to_fetch * 24, params=POLLUTANT_TARGETS)
-            found_target_params = POLLUTANT_TARGETS
-        else:
-            print(f"✅ [Init] 找到測站: {station['name']} ({station['id']})")
-            # 使用 DAYS_TO_FETCH=2 呼叫
-            df_raw, found_target_params = get_all_target_data(station["id"], POLLUTANT_TARGETS, days_to_fetch)
-
-            if df_raw.empty or len(df_raw) < MIN_DATA_THRESHOLD:
-                print("🚨 [Init] 實際數據量不足，使用模擬數據。")
-                df = generate_fake_data(limit=days_to_fetch * 24, params=POLLUTANT_TARGETS)
-                found_target_params = POLLUTANT_TARGETS
-            else:
-                df = df_raw.copy()
-            
-            # 合併 Meteostat 天氣數據
-            df = weather.fetch_and_merge_weather(df)
-
-        POLLUTANT_PARAMS = found_target_params
-        weather_feature_names = weather.get_weather_feature_names()
-        value_cols = [f'{p}_value' for p in POLLUTANT_PARAMS]
-        all_data_cols = value_cols + weather_feature_names
-
-        # 重採樣到小時
-        df.set_index('datetime', inplace=True)
-        df = df[value_cols + weather_feature_names].resample('H').mean()
-        df.reset_index(inplace=True)
-        df = df.dropna(how='all', subset=all_data_cols)
-        
-        # 計算歷史 AQI
-        df['aqi_value'] = df.apply(lambda row: calculate_aqi(row, POLLUTANT_PARAMS), axis=1)
-
-        # 移除任一污染物或天氣數據為 NaN 的行 (確保模型輸入完整)
-        df = df.dropna(subset=all_data_cols + ['aqi_value']).reset_index(drop=True)
-        print(f"📊 [Init] 最終用於訓練的數據量: {len(df)} 小時")
-
-
-        if len(df) <= max(LAG_HOURS):
-            raise ValueError(f"最終數據量 ({len(df)}) 不足 {max(LAG_HOURS)}，無法進行滯後特徵工程和訓練。")
-
-
-        # 2. 特徵工程
-        df['hour'] = df['datetime'].dt.hour
-        df['day_of_week'] = df['datetime'].dt.dayofweek
-        df['month'] = df['datetime'].dt.month
-        df['day_of_year'] = df['datetime'].dt.dayofyear
-        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-        df['day_sin'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
-        df['day_cos'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
-
-        df = df.sort_values('datetime')
-        feature_base_cols = value_cols + ['aqi_value']
-
-        for col_name in feature_base_cols:
-            param = col_name.replace('_value', '')
-            # 僅添加滯後特徵 (Lag features)
-            for lag in LAG_HOURS: 
-                df[f'{param}_lag_{lag}h'] = df[col_name].shift(lag)
-            
-            # 移除滾動平均/標準差特徵的創建
-
-        df = df.dropna().reset_index(drop=True)
-
-        # 儲存最後一筆數據，用於未來預測的起點
-        LAST_OBSERVATION = df.iloc[-1:].copy() 
-
-        base_time_features = ['hour', 'day_of_week', 'month', 'is_weekend', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
-        
-        air_quality_features = []
-        # 僅包含滯後特徵
-        for param in POLLUTANT_PARAMS + ['aqi']:
-            for lag in LAG_HOURS:
-                air_quality_features.append(f'{param}_lag_{lag}h')
-
-
-        FEATURE_COLUMNS = weather_feature_names + base_time_features + air_quality_features
-        FEATURE_COLUMNS = [col for col in FEATURE_COLUMNS if col in df.columns]
-
-        # 3. 數據分割與模型訓練
-        split_idx = int(len(df) * 0.8)
-        X = df[FEATURE_COLUMNS]
-        Y = {param: df[f'{param}_value'] for param in POLLUTANT_PARAMS}
-        
-        X_train = X[:split_idx]
-        Y_train = {param: Y[param][:split_idx] for param in POLLUTANT_PARAMS}
-
-        # 核心訓練步驟
-        print(f"⏳ [Init] 開始訓練 {len(POLLUTANT_PARAMS)} 個 XGBoost 模型 (N={N_ESTIMATORS}, Depth={MAX_DEPTH})...")
+        # 2. 載入 XGBoost 模型
+        TRAINED_MODELS = {}
         for param in POLLUTANT_PARAMS:
-            xgb_model = xgb.XGBRegressor(
-                n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, learning_rate=0.08, random_state=42, n_jobs=-1 
-            )
-            # 此處是上次超時的位置，現在數據量和模型複雜度都已降到最低
-            xgb_model.fit(X_train, Y_train[param]) 
-            TRAINED_MODELS[param] = xgb_model
-        print("✅ [Init] 模型訓練完成，應用程式準備就緒。")
+            model_path = os.path.join(MODELS_DIR, f'{param}_model.json')
+            if os.path.exists(model_path):
+                model = xgb.XGBRegressor()
+                model.load_model(model_path)
+                TRAINED_MODELS[param] = model
+            else:
+                print(f"❌ [Load] 找不到 {param} 的模型檔案: {model_path}")
+                del POLLUTANT_PARAMS[POLLUTANT_PARAMS.index(param)] # 移除缺失模型的參數
+        
+        if TRAINED_MODELS:
+            print(f"✅ [Load] 成功載入 {len(TRAINED_MODELS)} 個模型。")
+        else:
+            print("🚨 [Load] 未載入任何模型。")
+
 
     except Exception as e:
-        print(f"❌ [Init] 初始化執行失敗，將使用預設空值: {e}") 
+        print(f"❌ [Load] 模型載入失敗: {e}") 
         TRAINED_MODELS = {} 
         LAST_OBSERVATION = None
         FEATURE_COLUMNS = []
@@ -531,12 +236,9 @@ def initialize_app_data(lat: float, lon: float, days_to_fetch: int):
 # =================================================================
 app = Flask(__name__)
 
-# 應用程式啟動時，立即執行初始化 (在 gunicorn 啟動時執行一次)
+# 應用程式啟動時，立即執行模型載入 (快速)
 with app.app_context():
-    # 高雄市中心經緯度
-    LAT, LON = 22.6273, 120.3014
-    # 使用 DAYS_TO_FETCH=2 呼叫
-    initialize_app_data(LAT, LON, DAYS_TO_FETCH) 
+    load_models_and_metadata() 
 
 @app.route('/')
 def index():
@@ -576,5 +278,4 @@ def index():
 
 if __name__ == '__main__':
     # 在本地環境運行時使用
-    # 注意：本地運行可能仍需較長時間等待初始化完成
     app.run(debug=True)
