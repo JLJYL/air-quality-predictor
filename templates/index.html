@@ -18,14 +18,6 @@
         .aqi-200 { @apply bg-red-600; }
         .aqi-300 { @apply bg-purple-700; }
         .aqi-default { @apply bg-gray-400; }
-
-        .scrollbar-hide {
-            -ms-overflow-style: none;
-            scrollbar-width: none;
-        }
-        .scrollbar-hide::-webkit-scrollbar {
-            display: none;
-        }
     </style>
 </head>
 <body class="p-4 md:p-8 min-h-screen">
@@ -88,9 +80,7 @@
             </div>
         </div>
 
-        </div>
-
-    <script>
+    </div> <script>
         function getAqiColorClass(aqi) {
             if (aqi === "N/A" || isNaN(aqi) || aqi === null) return 'aqi-default'; 
             if (aqi <= 50) return 'aqi-50';
@@ -136,9 +126,6 @@
                 aqiStatusElement.classList.add('aqi-default');
                 aqiStatusElement.classList.add('text-white');
             }
-
-            // 因為您刪除了列表，所以不再需要更新清單項目顏色
-            // document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => { ... });
         }
 
         function createAqiChart() {
@@ -150,10 +137,10 @@
 
             // X 軸標籤顯示為 MM-DD HH:MM
             const labels = predictions.map(p => {
-                const parts = p.time.split(' '); // 假設格式為 YYYY-MM-DD HH:MM
-                const date = parts[0].substring(5); // 取得 MM-DD
-                const time = parts[1]; // 取得 HH:MM
-                return `${date} ${time}`; // 顯示 MM-DD HH:MM
+                const parts = p.time.split(' '); 
+                const date = parts[0].substring(5); 
+                const time = parts[1]; 
+                return `${date} ${time}`; 
             });
 
             const data = predictions.map(p => {
