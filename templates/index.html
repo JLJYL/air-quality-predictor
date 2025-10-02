@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ city_name }} AQI 預測</title>
-    <!-- 引入 Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* 使用 Inter 字體以保持現代感和清晰度 */
@@ -23,8 +22,8 @@
 
         /* 讓滾動條隱藏，但仍可滾動 */
         .scrollbar-hide {
-            -ms-overflow-style: none;  /* IE and Edge */
-            scrollbar-width: none;  /* Firefox */
+            -ms-overflow-style: none;  /* IE and Edge */
+            scrollbar-width: none;  /* Firefox */
         }
         .scrollbar-hide::-webkit-scrollbar {
             display: none; /* Chrome, Safari and Opera */
@@ -35,7 +34,6 @@
 
     <div class="max-w-4xl mx-auto">
         
-        <!-- 標題區域 -->
         <header class="text-center mb-10">
             <h1 class="text-4xl md:text-5xl font-extrabold text-gray-900 mb-2">
                 {{ city_name }} 空氣品質預測
@@ -44,7 +42,6 @@
             <p class="text-sm text-gray-400 mt-1">（數據初始化於應用程式啟動時完成）</p>
         </header>
 
-        <!-- 主要資訊卡片：最大 AQI -->
         <div id="maxAqiCard" class="shadow-2xl rounded-xl p-6 md:p-8 mb-10 text-white transition duration-500 transform hover:scale-[1.01] flex flex-col md:flex-row justify-between items-center" 
              style="background-color: #2c3e50;">
             
@@ -72,19 +69,24 @@
             </div>
         </div>
 
-        <!-- 預測細節列表 -->
         <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">逐小時預測明細</h3>
         
         <div id="predictionsList" class="space-y-3 max-h-[60vh] overflow-y-auto scrollbar-hide p-2 bg-white rounded-lg shadow-inner">
             {% if aqi_predictions %}
                 {% for prediction in aqi_predictions %}
-                <div class="flex justify-between items-center p-4 rounded-lg shadow-sm border border-gray-100 hover:bg-gray-50 transition duration-150">
-                    <!-- 時間 -->
+                <div class="flex justify-between items-center p-4 rounded-lg shadow-sm border border-gray-100 
+                    {% if prediction.is_current %} bg-blue-50 border-blue-200 shadow-md {% else %} hover:bg-gray-50 {% endif %} transition duration-150">
+                    
                     <span class="text-gray-600 font-medium text-sm md:text-base">
-                        {{ prediction.time }} ({{ '現在 +%s 小時' % loop.index }})
+                        {{ prediction.time }} 
+                        
+                        {% if prediction.is_current %}
+                            <span class="font-bold text-blue-700">(現在)</span>
+                        {% else %}
+                            (現在 +{{ loop.index - 1 }} 小時)
+                        {% endif %}
                     </span>
                     
-                    <!-- AQI 數值圓圈 -->
                     <div class="flex items-center space-x-3">
                         <span class="text-gray-700 font-semibold text-base md:text-lg">
                             AQI:
@@ -124,11 +126,14 @@
             const maxAqiCard = document.getElementById('maxAqiCard');
             const aqiColorClass = getAqiColorClass(parseInt(maxAqiValue));
 
-            // 更新主卡片顏色
+            // 更新主卡片狀態標籤的顏色
             if (maxAqiValue !== "N/A") {
-                maxAqiCard.classList.remove('bg-gray-400'); // 移除預設顏色
-                // 替換主卡片背景色為深藍色，以保持主視覺穩定，僅用文字標籤顏色標示狀態
-                aqiStatusElement.classList.add(getAqiColorClass(parseInt(maxAqiValue))); 
+                // 確保移除所有潛在的舊顏色類別
+                const allAqiClasses = ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'];
+                aqiStatusElement.classList.remove(...allAqiClasses); 
+                
+                // 添加正確的顏色
+                aqiStatusElement.classList.add(getAqiColorClass(parseInt(maxAqiValue))); 
                 aqiStatusElement.classList.add('text-white');
             }
 
@@ -137,6 +142,10 @@
             document.querySelectorAll('[id^="aqi-badge-"]').forEach(badge => {
                 const aqi = parseInt(badge.getAttribute('data-aqi'));
                 if (!isNaN(aqi)) {
+                    // 確保移除所有潛在的舊顏色類別
+                    const allAqiClasses = ['aqi-50', 'aqi-100', 'aqi-150', 'aqi-200', 'aqi-300', 'aqi-default'];
+                    badge.classList.remove(...allAqiClasses);
+                    
                     const colorClass = getAqiColorClass(aqi);
                     badge.classList.add(colorClass);
                 }
