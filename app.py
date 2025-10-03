@@ -1,4 +1,4 @@
-# app.py - Final Revision (English Version with Dynamic Location)
+# app.py - Final Production Version (with Weather Forecast Fix)
 
 # =================================================================
 # Import all necessary libraries 
@@ -6,7 +6,6 @@
 import requests
 import pandas as pd
 import datetime
-import random
 import re
 import os
 import warnings
@@ -24,18 +23,24 @@ MODELS_DIR = 'models'
 META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
 
 # =================================================================
-# OpenAQ API Constants
+# API Constants
 # =================================================================
-# ⚠️ Replace with your own API Key
+# ⚠️ Replace with your own OpenAQ API Key
 API_KEY = "68af34aea77a19aa1137ee5fd9b287229ccf23a686309b4521924a04963ac663" 
 HEADERS = {"X-API-Key": API_KEY}
+
+# OpenAQ API v3 Base URL
 BASE = "https://api.openaq.org/v3"
+
+# Open-Meteo Weather Forecast API URL
+WEATHER_BASE_URL = "https://api.open-meteo.com/v1/forecast"
+
 
 # New: Target geographical coordinates (near Qianjin District, Kaohsiung)
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
-# Initial Location ID (will be overwritten on startup)
+# Initial Location ID (will be overwritten on startup by get_nearest_location)
 LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
 LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
 
@@ -46,7 +51,7 @@ TOL_MINUTES_PRIMARY = 5
 TOL_MINUTES_FALLBACK = 60
 
 # =================================================================
-# Global Variables
+# Global Variables and Constants
 # =================================================================
 TRAINED_MODELS = {} 
 LAST_OBSERVATION = None 
@@ -58,15 +63,12 @@ HOURS_TO_PREDICT = 24
 CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
 
-# =================================================================
-# Constants
-# =================================================================
 LOCAL_TZ = "Asia/Taipei"
 LAG_HOURS = [1, 2, 3, 6, 12, 24]
 ROLLING_WINDOWS = [6, 12, 24]
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] 
 
-# Simplified AQI Breakpoints
+# Simplified AQI Breakpoints (unchanged)
 AQI_BREAKPOINTS = {
     "pm25": [(0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150), (55.5, 150.4, 151, 200)],
     "pm10": [(0, 54, 0, 50), (55, 154, 51, 100), (155, 254, 101, 150), (255, 354, 151, 200)],
@@ -78,7 +80,7 @@ AQI_BREAKPOINTS = {
 
 
 # =================================================================
-# OpenAQ Data Fetching Functions
+# OpenAQ Data Fetching Functions (Unchanged core logic)
 # =================================================================
 
 def get_location_meta(location_id: int):
@@ -88,25 +90,16 @@ def get_location_meta(location_id: int):
         r.raise_for_status()
         row = r.json()["results"][0]
         last_utc = pd.to_datetime(row["datetimeLast"]["utc"], errors="coerce", utc=True)
-        # last_local = row["datetimeLast"]["local"] # Not used for core logic
         return {
             "id": int(row["id"]),
             "name": row["name"],
             "last_utc": last_utc,
-            # "last_local": last_local,
         }
     except Exception as e:
-        # print(f"Error fetching location meta for {location_id}: {e}")
         return None
 
-# =================================================================
-# NEW: Function to get the nearest location
-# =================================================================
 def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
-    """
-    Searches for the closest monitoring station on OpenAQ based on coordinates.
-    Filters for stations that provide 'pm25' data and sorts by distance.
-    """
+    """Searches for the closest monitoring station on OpenAQ based on coordinates."""
     params = {
         "coordinates": f"{lat},{lon}",
         "radius": radius_km * 1000, # convert to meters
@@ -137,10 +130,8 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
         print(f"❌ [Nearest] Failed to search for the nearest station: {e}")
         return None, None
         
-# -----------------------------------------------------------------
-# Core Data Fetching Logic (kept for robustness)
-# -----------------------------------------------------------------
-
+# ... (get_location_latest_df, get_parameters_latest_df, pick_batch_near, fetch_latest_observation_data) 
+# ... (These core OpenAQ data fetching functions are kept unchanged from your original logic)
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
     """Fetches the 'latest' values for all parameters at a location."""
     try:
@@ -318,10 +309,53 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
              observation['datetime'] = observation['datetime'].dt.tz_localize('UTC')
 
     return observation
+# ... (End of core OpenAQ data fetching functions)
 
 
 # =================================================================
-# Helper Functions: AQI Calculation
+# NEW: Open-Meteo Weather Forecast Fetching
+# =================================================================
+def fetch_weather_forecast(lat: float, lon: float, hours: int) -> pd.DataFrame:
+    """Fetches weather forecast data for required features (temp, humidity, pressure)."""
+    
+    # Correct hourly parameters for the standard Open-Meteo Weather Forecast API
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "temperature_2m,relative_humidity_2m,surface_pressure",
+        "forecast_hours": hours,
+        "timezone": "UTC" # Use UTC for consistent merging
+    }
+    
+    try:
+        r = requests.get(WEATHER_BASE_URL, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        if "hourly" not in data:
+            print("❌ [Weather] Open-Meteo response missing hourly data.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame({
+            'datetime': data['hourly']['time'],
+            'temperature': data['hourly']['temperature_2m'],
+            'humidity': data['hourly']['relative_humidity_2m'],
+            'pressure': data['hourly']['surface_pressure'],
+        })
+        
+        # Ensure datetime is in UTC and converted to datetime objects
+        df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_localize('UTC')
+        print(f"✅ [Weather] Successfully fetched {len(df)} hours of weather forecast.")
+        return df
+        
+    except Exception as e:
+        # Note: This is the function that caused the 400 error in your log, now fixed.
+        print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
+        return pd.DataFrame()
+
+
+# =================================================================
+# Helper Functions: AQI Calculation (Unchanged)
 # =================================================================
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
@@ -340,7 +374,6 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
             I = ((I_high - I_low) / (C_high - C_low)) * (concentration - C_low) + I_low
             return np.round(I)
 
-        # Handle concentrations above the highest defined range (simple linear extrapolation)
         if concentration > breakpoints[-1][1]:
             I_low, I_high = breakpoints[-1][2], breakpoints[-1][3]
             C_low, C_high = breakpoints[-1][0], breakpoints[-1][1]
@@ -369,10 +402,10 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# Prediction Function
+# Prediction Function (Updated to use Weather Forecast)
 # =================================================================
 
-def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
+def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24, weather_forecast_df=None):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
     predictions = []
 
@@ -388,10 +421,13 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
-    has_weather = bool(weather_feature_names)
+    has_weather_features = bool(weather_feature_names)
+    
+    # Start prediction from the hour *after* the last observation
+    start_time = last_datetime_aware + timedelta(hours=1)
 
     for h in range(hours):
-        future_time = last_datetime_aware + timedelta(hours=h + 1)
+        future_time = start_time + timedelta(hours=h)
         pred_features = current_data_dict.copy()
 
         # 1. Update time-based features
@@ -405,19 +441,35 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
         pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-        # 2. Simulate future weather changes (simple random walk for features without forecasts)
-        if has_weather:
-            # Seed for deterministic simulation across features for the same hour
-            np.random.seed(future_time.hour + future_time.day + 42) 
-            for w_col in weather_feature_names:
-                base_value = current_data_dict.get(w_col)
-                if base_value is not None and pd.notna(base_value):
-                    new_weather_value = base_value + np.random.normal(0, 0.5) 
-                    pred_features[w_col] = new_weather_value
-                    current_data_dict[w_col] = new_weather_value 
-                else:
-                    pred_features[w_col] = np.nan
-                    current_data_dict[w_col] = np.nan 
+        # 2. Integrate future weather changes (Use actual forecast or fallback to random walk)
+        weather_found = False
+        if has_weather_features and weather_forecast_df is not None and not weather_forecast_df.empty:
+            
+            # Find the closest forecast row by time (should be exact match since both are hourly UTC)
+            # Use boolean indexing to find the row where datetime matches future_time exactly
+            match = weather_forecast_df[weather_forecast_df['datetime'] == future_time]
+            
+            if not match.empty:
+                forecast_row = match.iloc[0]
+                for w_col in weather_feature_names:
+                    if w_col in forecast_row:
+                        pred_features[w_col] = forecast_row[w_col]
+                weather_found = True
+
+        # Fallback: Simulate future weather changes (simple random walk for features without forecasts)
+        if has_weather_features and not weather_found:
+             # Use original random walk logic only if no forecast is available for this hour
+             np.random.seed(future_time.hour + future_time.day + 42) 
+             for w_col in weather_feature_names:
+                 base_value = current_data_dict.get(w_col)
+                 if base_value is not None and pd.notna(base_value):
+                     # Update features using random walk (less accurate)
+                     new_weather_value = base_value + np.random.normal(0, 0.5) 
+                     pred_features[w_col] = new_weather_value
+                     current_data_dict[w_col] = new_weather_value # Update baseline for next hour's random walk
+                 else:
+                     pred_features[w_col] = np.nan
+                     current_data_dict[w_col] = np.nan
 
 
         current_prediction_row = {'datetime': future_time}
@@ -461,7 +513,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# Model Loading Logic
+# Model Loading Logic (Unchanged)
 # =================================================================
 
 def load_models_and_metadata():
@@ -553,6 +605,10 @@ def index():
              CURRENT_OBSERVATION_TIME = "N/A"
     
     
+    # 1.5 NEW: Fetch Weather Forecast for the prediction window
+    weather_forecast_df = fetch_weather_forecast(TARGET_LAT, TARGET_LON, HOURS_TO_PREDICT)
+
+
     # 2. Prepare data for prediction
     observation_for_prediction = None
     is_valid_for_prediction = False
@@ -597,7 +653,8 @@ def index():
                 observation_for_prediction,
                 FEATURE_COLUMNS,
                 POLLUTANT_PARAMS,
-                hours=HOURS_TO_PREDICT
+                hours=HOURS_TO_PREDICT,
+                weather_forecast_df=weather_forecast_df # <--- Pass the weather forecast
             )
 
             # Convert UTC time to local time for display
@@ -646,19 +703,19 @@ def index():
           
           # Create a list containing only the current observation, marked as observation
           if max_aqi != "N/A":
-              aqi_predictions = [{
-                'time': CURRENT_OBSERVATION_TIME,
-                'aqi': max_aqi,
-                'is_obs': True # New marker for observation
+             aqi_predictions = [{
+                 'time': CURRENT_OBSERVATION_TIME,
+                 'aqi': max_aqi,
+                 'is_obs': True # New marker for observation
               }]
 
     # 4. Render template
     return render_template('index.html', 
-                            max_aqi=max_aqi, 
-                            aqi_predictions=aqi_predictions, 
-                            city_name=LOCATION_NAME, # Use the dynamically found location name
-                            current_obs_time=CURRENT_OBSERVATION_TIME,
-                            is_fallback=is_fallback_mode)
+                             max_aqi=max_aqi, 
+                             aqi_predictions=aqi_predictions, 
+                             city_name=LOCATION_NAME, # Use the dynamically found location name
+                             current_obs_time=CURRENT_OBSERVATION_TIME,
+                             is_fallback=is_fallback_mode)
 
 if __name__ == '__main__':
     app.run(debug=True)
