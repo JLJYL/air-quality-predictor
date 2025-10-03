@@ -67,11 +67,11 @@
             
             {% if is_fallback %}
             <p class="mt-4 text-sm text-gray-500 text-center">
-                *Prediction models are unavailable or failed. Displaying the **Latest Observed/Starting AQI** ({{ current_obs_time }}).
+                *Prediction models are unavailable or failed. Displaying the **Latest Observed AQI** ({{ current_obs_time }}).
             </p>
             {% else %}
             <p class="mt-4 text-sm text-gray-500 text-center">
-                *The line shows the forecast. **Latest OpenAQ Observation** from {{ current_obs_time }} is used as the starting point.
+                *The line shows the forecast. Current data from {{ current_obs_time }} is used as the starting point.
             </p>
             {% endif %}
         </div>
@@ -106,7 +106,6 @@
             const maxAqiValue = parseInt(document.getElementById('maxAqiValue').innerText.trim());
 
             let colorClass = 'aqi-default';
-            
             if (!isNaN(maxAqiValue)) {
                 if (maxAqiValue <= 50) colorClass = 'aqi-50';
                 else if (maxAqiValue <= 100) colorClass = 'aqi-100';
@@ -115,7 +114,7 @@
                 else colorClass = 'aqi-300';
             }
             // Remove old background classes and add the new one
-            aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('aqi-')).join(' ');
+            aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('bg-')).join(' ');
             aqiStatusElement.classList.add(colorClass);
         }
 
@@ -126,16 +125,16 @@
 
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); 
-                return `${parts[0].substring(0)} ${parts[1]}`; 
+                // Display only MM-DD HH:MM
+                return `${parts[0].substring(5)} ${parts[1]}`; 
             });
 
             const data = predictions.map(p => {
                 const aqi = p.aqi;
-                return (aqi === "N/A" || aqi === null) ? null : parseInt(aqi);
+                return (aqi === "N/A" || isNaN(aqi) || aqi === null) ? null : parseInt(aqi);
             });
             
             let datasets = [];
-            // 如果只有一個點且它被標記為觀察值，則為回退模式
             const isFallback = predictions.length === 1 && predictions[0].is_obs;
 
             if (isFallback) {
@@ -149,8 +148,7 @@
                     pointRadius: 8,
                     pointBackgroundColor: getAqiColor(data[0]),
                     pointBorderColor: '#fff',
-                    type: 'line', 
-                    spanGaps: false 
+                    type: 'line', // Use line type with a single point
                 });
             } else {
                 // Prediction mode: Line chart
@@ -161,12 +159,11 @@
                     borderColor: '#3B82F6',
                     backgroundColor: 'rgba(59, 130, 246, 0.1)',
                     borderWidth: 3,
-                    fill: 'origin', 
-                    tension: 0.3,
+                    fill: true,
+                    tension: 0.4,
                     pointRadius: 5,
                     pointBackgroundColor: borderColors,
                     pointBorderColor: '#fff',
-                    spanGaps: true 
                 });
             }
 
@@ -181,50 +178,39 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { 
-                        legend: { display: false },
-                        tooltip: {
-                            callbacks: {
-                                title: function(tooltipItems) {
-                                    const index = tooltipItems[0].dataIndex;
-                                    if (predictions[index] && predictions[index].is_obs) {
-                                        return '【OPENAQ LATEST】';
-                                    }
-                                    return 'Open-Meteo Forecast';
-                                }
-                            }
-                        }
-                    },
+                    plugins: { legend: { display: false } },
                     scales: {
                         y: { 
                             beginAtZero: true, 
                             max: 200, 
-                            title: {
-                                display: true,
-                                text: 'AQI Value (0-200)',
-                                color: '#4B5563'
-                            },
-                            grid: {
-                                color: function(context) {
-                                    const value = context.tick.value;
-                                    if (value === 50 || value === 100 || value === 150 || value === 200) {
-                                        return 'rgba(0, 0, 0, 0.2)'; 
-                                    }
-                                    return 'rgba(0, 0, 0, 0.1)';
-                                },
-                                lineWidth: function(context) {
-                                    const value = context.tick.value;
-                                    return (value === 50 || value === 100 || value === 150 || value === 200) ? 1.5 : 1;
+                            ticks: {
+                                callback: function(value) {
+                                    return (value <= 200) ? value : null; 
                                 }
                             }
                         },
                         x: { 
                             ticks: {
-                                maxRotation: 0, minRotation: 0,
+                                maxRotation: 45, minRotation: 45,
                                 callback: function(value, index) {
                                     const fullLabel = this.getLabelForValue(value);
-                                    const timePart = fullLabel.split(' ')[1];
-                                    return (index % 3 === 0) ? timePart : ''; 
+                                    const parts = fullLabel.split(' ');
+                                    // Show the full label every 6 hours, otherwise just the time
+                                    return (index % 6 === 0) ? fullLabel : parts[1]; 
+                                }
+                            }
+                        }
+                    },
+                    // Custom Tooltip for Observation marker
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems, data) {
+                                    const index = tooltipItems[0].dataIndex;
+                                    if (predictions[index] && predictions[index].is_obs) {
+                                        return '【LATEST OBSERVATION】';
+                                    }
+                                    return 'Forecast';
                                 }
                             }
                         }
