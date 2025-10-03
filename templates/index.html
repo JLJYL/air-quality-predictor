@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ city_name }} AQI Forecast</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <style>
+        body { font-family: sans-serif; background-color: #f7f7ff; }
+        /* Tailwind classes for color mapping */
+        .aqi-50 { background-color: #10B981; } /* Green */
+        .aqi-100 { background-color: #EAB308; } /* Yellow */
+        .aqi-150 { background-color: #F97316; } /* Orange */
+        .aqi-200 { background-color: #DC2626; } /* Red */
+        .aqi-300 { background-color: #7C3AED; } /* Purple */
+    </style>
+</head>
+<body class="p-8 min-h-screen">
+
+    <div class="max-w-6xl mx-auto">
+        
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-gray-900 mb-2">
+                Air Quality Forecast for {{ city_name }} Station
+            </h1>
+            <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
+        </header>
+
+        <div id="maxAqiCard" class="shadow-2xl rounded-xl p-8 mb-10 text-white flex justify-between items-center" 
+             style="background-color: #2c3e50;">
+            
+            <div>
+                <p class="text-lg font-medium opacity-80">
+                    Maximum Predicted AQI in the next 24 hours
+                </p>
+                <h2 id="maxAqiValue" class="text-7xl font-black mt-1">
+                    {{ max_aqi }}
+                </h2>
+            </div>
+            
+            <div id="aqiStatus" class="rounded-full px-6 py-2 text-xl font-bold text-white shadow-md">
+                {% if max_aqi == "N/A" %}
+                    N/A
+                {% elif max_aqi | int <= 50 %}
+                    Good
+                {% elif max_aqi | int <= 100 %}
+                    Moderate
+                {% elif max_aqi | int <= 150 %}
+                    Unhealthy for Sensitive Groups
+                {% elif max_aqi | int <= 200 %}
+                    Unhealthy
+                {% else %}
+                    Very Unhealthy
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
+            <h3 class="text-2xl font-bold text-gray-800 mb-4">
+                AQI Trend Chart
+            </h3>
+            <div class="relative" style="height: 400px;">
+                <canvas id="aqiChart"></canvas>
+            </div>
+            
+            {% if is_fallback %}
+            <p class="mt-4 text-sm text-gray-500 text-center">
+                *Prediction models are unavailable or failed. Displaying the **Latest Observed AQI** ({{ current_obs_time }}).
+            </p>
+            {% else %}
+            <p class="mt-4 text-sm text-gray-500 text-center">
+                *The line shows the forecast. Current data from {{ current_obs_time }} is used as the starting point.
+            </p>
+            {% endif %}
+        </div>
+        
+    </div> 
+    
+    <script>
+        // --- 1. Data Variable Transfer and Parsing ---
+        let predictions = [];
+        try {
+            const aqi_predictions_json = '{{ aqi_predictions | tojson | safe }}';
+            if (aqi_predictions_json && aqi_predictions_json !== 'null' && aqi_predictions_json !== 'None') {
+                predictions = JSON.parse(aqi_predictions_json);
+            }
+        } catch (e) {
+            console.error("AQI data parsing failed:", e); 
+        }
+        // --------------------------------------------------------
+
+        function getAqiColor(aqi) {
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return '#9CA3AF';
+            if (aqi <= 50) return '#10B981'; 
+            if (aqi <= 100) return '#EAB308'; 
+            if (aqi <= 150) return '#F97316'; 
+            if (aqi <= 200) return '#DC2626'; 
+            return '#7C3AED'; 
+        }
+        
+        // Updates the color of the top card
+        function updateAqiColors() {
+            const aqiStatusElement = document.getElementById('aqiStatus');
+            const maxAqiValue = parseInt(document.getElementById('maxAqiValue').innerText.trim());
+
+            let colorClass = 'aqi-default';
+            if (!isNaN(maxAqiValue)) {
+                if (maxAqiValue <= 50) colorClass = 'aqi-50';
+                else if (maxAqiValue <= 100) colorClass = 'aqi-100';
+                else if (maxAqiValue <= 150) colorClass = 'aqi-150';
+                else if (maxAqiValue <= 200) colorClass = 'aqi-200';
+                else colorClass = 'aqi-300';
+            }
+            // Remove old background classes and add the new one
+            aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('bg-')).join(' ');
+            aqiStatusElement.classList.add(colorClass);
+        }
+
+        function createAqiChart() {
+            if (!predictions || predictions.length === 0) {
+                return;
+            }
+
+            const labels = predictions.map(p => {
+                const parts = p.time.split(' '); 
+                // Display only MM-DD HH:MM
+                return `${parts[0].substring(5)} ${parts[1]}`; 
+            });
+
+            const data = predictions.map(p => {
+                const aqi = p.aqi;
+                return (aqi === "N/A" || isNaN(aqi) || aqi === null) ? null : parseInt(aqi);
+            });
+            
+            let datasets = [];
+            const isFallback = predictions.length === 1 && predictions[0].is_obs;
+
+            if (isFallback) {
+                // Fallback mode: Display a single observation point
+                datasets.push({
+                    label: 'Latest Observed AQI',
+                    data: data,
+                    borderColor: '#9CA3AF',
+                    backgroundColor: 'rgba(156, 163, 175, 0.5)',
+                    borderWidth: 5,
+                    pointRadius: 8,
+                    pointBackgroundColor: getAqiColor(data[0]),
+                    pointBorderColor: '#fff',
+                    type: 'line', // Use line type with a single point
+                });
+            } else {
+                // Prediction mode: Line chart
+                const borderColors = data.map(aqi => getAqiColor(aqi));
+                datasets.push({
+                    label: 'Predicted AQI Value',
+                    data: data,
+                    borderColor: '#3B82F6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 5,
+                    pointBackgroundColor: borderColors,
+                    pointBorderColor: '#fff',
+                });
+            }
+
+            const ctx = document.getElementById('aqiChart').getContext('2d');
+            
+            new Chart(ctx, {
+                type: 'line', 
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { 
+                            beginAtZero: true, 
+                            max: 200, 
+                            ticks: {
+                                callback: function(value) {
+                                    return (value <= 200) ? value : null; 
+                                }
+                            }
+                        },
+                        x: { 
+                            ticks: {
+                                maxRotation: 45, minRotation: 45,
+                                callback: function(value, index) {
+                                    const fullLabel = this.getLabelForValue(value);
+                                    const parts = fullLabel.split(' ');
+                                    // Show the full label every 6 hours, otherwise just the time
+                                    return (index % 6 === 0) ? fullLabel : parts[1]; 
+                                }
+                            }
+                        }
+                    },
+                    // Custom Tooltip for Observation marker
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems, data) {
+                                    const index = tooltipItems[0].dataIndex;
+                                    if (predictions[index] && predictions[index].is_obs) {
+                                        return '【LATEST OBSERVATION】';
+                                    }
+                                    return 'Forecast';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        window.onload = function() {
+            updateAqiColors();
+            createAqiChart();
+        };
+    </script>
+</body>
+</html>
