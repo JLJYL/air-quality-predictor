@@ -1,64 +1,65 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- 頁面標題使用城市名稱 -->
-    <title>{{ city_name }} AQI 預測</title>
+    <title>{{ city_name }} AQI Forecast</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Chart.js and Plugins for plotting and zooming -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
-        /* 使用 Inter 字體 */
-        body { font-family: "Inter", sans-serif; background-color: #f7f7ff; }
-        /* Tailwind classes for color mapping for AQI Status */
-        .aqi-50 { background-color: #10B981; } /* Green - 良好 */
-        .aqi-100 { background-color: #EAB308; } /* Yellow - 普通 */
-        .aqi-150 { background-color: #F97316; } /* Orange - 對敏感族群不健康 */
-        .aqi-200 { background-color: #DC2626; } /* Red - 不健康 */
-        .aqi-300 { background-color: #7C3AED; } /* Purple - 非常不健康 */
-        .aqi-default { background-color: #9CA3AF; } /* Default gray */
+        body { font-family: sans-serif; background-color: #f7f7ff; }
+        /* Tailwind classes for color mapping */
+        .aqi-50 { background-color: #10B981; } /* Green */
+        .aqi-100 { background-color: #EAB308; } /* Yellow */
+        .aqi-150 { background-color: #F97316; } /* Orange */
+        .aqi-200 { background-color: #DC2626; } /* Red */
+        .aqi-300 { background-color: #7C3AED; } /* Purple */
     </style>
 </head>
-<body class="p-4 sm:p-8 min-h-screen">
+<body class="p-8 min-h-screen">
 
     <div class="max-w-6xl mx-auto">
         
         <header class="text-center mb-10">
-            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">
-                空氣品質預測 - {{ city_name }} 站點
+            <h1 class="text-4xl font-extrabold text-gray-900 mb-2">
+                Air Quality Forecast for {{ city_name }} Station
             </h1>
-            <p class="text-md sm:text-lg text-gray-600">未來 24 小時 AQI 趨勢</p>
+            <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
         </header>
 
-        <!-- Max AQI Card -->
-        <div id="maxAqiCard" class="shadow-2xl rounded-xl p-6 sm:p-8 mb-10 text-white flex flex-col sm:flex-row justify-between items-center space-y-4 sm:space-y-0" 
+        <div id="maxAqiCard" class="shadow-2xl rounded-xl p-8 mb-10 text-white flex justify-between items-center" 
              style="background-color: #2c3e50;">
             
-            <div class="text-center sm:text-left">
+            <div>
                 <p class="text-lg font-medium opacity-80">
-                    未來 24 小時最大預測 AQI
+                    Maximum Predicted AQI in the next 24 hours
                 </p>
-                <h2 id="maxAqiValue" class="text-6xl sm:text-7xl font-black mt-1">
+                <h2 id="maxAqiValue" class="text-7xl font-black mt-1">
                     {{ max_aqi }}
                 </h2>
             </div>
             
-            <!-- AQI Status Badge -->
-            <div id="aqiStatus" class="rounded-full px-6 py-2 text-xl font-bold text-white shadow-md transition duration-300 ease-in-out transform hover:scale-105">
+            <div id="aqiStatus" class="rounded-full px-6 py-2 text-xl font-bold text-white shadow-md">
                 {% if max_aqi == "N/A" %}
                     N/A
+                {% elif max_aqi | int <= 50 %}
+                    Good
+                {% elif max_aqi | int <= 100 %}
+                    Moderate
+                {% elif max_aqi | int <= 150 %}
+                    Unhealthy for Sensitive Groups
+                {% elif max_aqi | int <= 200 %}
+                    Unhealthy
                 {% else %}
-                    {{ max_aqi | int | get_aqi_status }}
+                    Very Unhealthy
                 {% endif %}
             </div>
         </div>
 
-        <!-- Chart Container -->
-        <div class="bg-white rounded-xl shadow-xl p-4 sm:p-6 mb-10">
+        <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">
-                AQI 趨勢圖
+                AQI Trend Chart
             </h3>
             <div class="relative" style="height: 400px;">
                 <canvas id="aqiChart"></canvas>
@@ -66,11 +67,11 @@
             
             {% if is_fallback %}
             <p class="mt-4 text-sm text-gray-500 text-center">
-                *預測模型無法使用或失敗。顯示**最近觀測到的 AQI** ({{ current_obs_time }})。
+                *Prediction models are unavailable or failed. Displaying the **Latest Observed/Starting AQI** ({{ current_obs_time }}).
             </p>
             {% else %}
             <p class="mt-4 text-sm text-gray-500 text-center">
-                *曲線顯示預測值。當前數據 ({{ current_obs_time }}) 作為起點。
+                *The line shows the forecast. **Latest OpenAQ Observation** from {{ current_obs_time }} is used as the starting point.
             </p>
             {% endif %}
         </div>
@@ -78,36 +79,34 @@
     </div> 
     
     <script>
-        // 將 Python 傳入的 AQI 狀態判斷邏輯轉譯到 JavaScript，以便在 Chart.js 中使用
-        function getAqiColor(aqi) {
-            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return '#9CA3AF';
-            if (aqi <= 50) return '#10B981'; /* Green */
-            if (aqi <= 100) return '#EAB308'; /* Yellow */
-            if (aqi <= 150) return '#F97316'; /* Orange */
-            if (aqi <= 200) return '#DC2626'; /* Red */
-            return '#7C3AED'; /* Purple */
-        }
-        
         // --- 1. Data Variable Transfer and Parsing ---
         let predictions = [];
         try {
-            // 從 Flask/Jinja 傳入的 JSON 字符串
-            const aqi_predictions_json = JSON.parse('{{ aqi_predictions | safe }}'); 
+            const aqi_predictions_json = '{{ aqi_predictions | tojson | safe }}';
             if (aqi_predictions_json && aqi_predictions_json !== 'null' && aqi_predictions_json !== 'None') {
-                predictions = aqi_predictions_json;
+                predictions = JSON.parse(aqi_predictions_json);
             }
         } catch (e) {
-            console.error("AQI 數據解析失敗:", e); 
+            console.error("AQI data parsing failed:", e); 
         }
         // --------------------------------------------------------
 
-        // Updates the color of the top card badge
+        function getAqiColor(aqi) {
+            if (aqi === "N/A" || isNaN(aqi) || aqi === null) return '#9CA3AF';
+            if (aqi <= 50) return '#10B981'; 
+            if (aqi <= 100) return '#EAB308'; 
+            if (aqi <= 150) return '#F97316'; 
+            if (aqi <= 200) return '#DC2626'; 
+            return '#7C3AED'; 
+        }
+        
+        // Updates the color of the top card
         function updateAqiColors() {
             const aqiStatusElement = document.getElementById('aqiStatus');
-            const maxAqiValueText = document.getElementById('maxAqiValue').innerText.trim();
-            const maxAqiValue = parseInt(maxAqiValueText);
+            const maxAqiValue = parseInt(document.getElementById('maxAqiValue').innerText.trim());
 
             let colorClass = 'aqi-default';
+            
             if (!isNaN(maxAqiValue)) {
                 if (maxAqiValue <= 50) colorClass = 'aqi-50';
                 else if (maxAqiValue <= 100) colorClass = 'aqi-100';
@@ -122,62 +121,52 @@
 
         function createAqiChart() {
             if (!predictions || predictions.length === 0) {
-                // 如果沒有數據，顯示一個錯誤或提示訊息
-                const chartContainer = document.getElementById('aqiChart').parentNode;
-                chartContainer.innerHTML = '<p class="text-center text-gray-500 p-10">抱歉，AQI 預測數據目前無法載入。</p>';
                 return;
             }
 
             const labels = predictions.map(p => {
                 const parts = p.time.split(' '); 
-                // 顯示 月-日 時:分
-                return `${parts[0].substring(5)} ${parts[1].substring(0, 5)}`; 
+                return `${parts[0].substring(0)} ${parts[1]}`; 
             });
 
             const data = predictions.map(p => {
                 const aqi = p.aqi;
-                // 將 "N/A" 或無效值轉換為 null，Chart.js 會將其視為數據缺失
-                return (aqi === "N/A" || isNaN(parseInt(aqi)) || aqi === null) ? null : parseInt(aqi);
+                return (aqi === "N/A" || aqi === null) ? null : parseInt(aqi);
             });
             
             let datasets = [];
-            // 檢查是否為單點備用模式 (Fallback mode)
+            // 如果只有一個點且它被標記為觀察值，則為回退模式
             const isFallback = predictions.length === 1 && predictions[0].is_obs;
 
             if (isFallback) {
-                // 備用模式: 只顯示一個觀測點
+                // Fallback mode: Display a single observation point
                 datasets.push({
-                    label: '最新觀測 AQI',
+                    label: 'Latest Observed AQI',
                     data: data,
-                    borderColor: getAqiColor(data[0]),
+                    borderColor: '#9CA3AF',
                     backgroundColor: 'rgba(156, 163, 175, 0.5)',
                     borderWidth: 5,
                     pointRadius: 8,
                     pointBackgroundColor: getAqiColor(data[0]),
                     pointBorderColor: '#fff',
-                    type: 'bar', // 在單點模式下使用 bar 更為清晰
+                    type: 'line', 
+                    spanGaps: false 
                 });
             } else {
-                // 預測模式: 折線圖
-                const observationIndex = predictions.findIndex(p => p.is_obs);
-                
-                // 設置觀察點的顏色
-                const pointColors = data.map((aqi, index) => {
-                    return (index === observationIndex) ? '#000000' : getAqiColor(aqi);
-                });
-
+                // Prediction mode: Line chart
+                const borderColors = data.map(aqi => getAqiColor(aqi));
                 datasets.push({
-                    label: '預測 AQI 值',
+                    label: 'Predicted AQI Value',
                     data: data,
-                    borderColor: '#3B82F6', // 藍色預測線
+                    borderColor: '#3B82F6',
                     backgroundColor: 'rgba(59, 130, 246, 0.1)',
                     borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
+                    fill: 'origin', 
+                    tension: 0.3,
                     pointRadius: 5,
-                    pointHitRadius: 10,
-                    pointBackgroundColor: pointColors,
+                    pointBackgroundColor: borderColors,
                     pointBorderColor: '#fff',
+                    spanGaps: true 
                 });
             }
 
@@ -199,61 +188,44 @@
                                 title: function(tooltipItems) {
                                     const index = tooltipItems[0].dataIndex;
                                     if (predictions[index] && predictions[index].is_obs) {
-                                        return '【最新觀測值】';
+                                        return '【OPENAQ LATEST】';
                                     }
-                                    return '預測值';
-                                },
-                                label: function(context) {
-                                    let label = context.dataset.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed.y !== null) {
-                                        label += context.parsed.y + ' AQI';
-                                    }
-                                    return label;
+                                    return 'Open-Meteo Forecast';
                                 }
-                            }
-                        },
-                        zoom: {
-                            zoom: {
-                                wheel: { enabled: true },
-                                pinch: { enabled: true },
-                                mode: 'x',
-                            },
-                            pan: {
-                                enabled: true,
-                                mode: 'x',
                             }
                         }
                     },
                     scales: {
                         y: { 
-                            title: { display: true, text: 'AQI 數值' },
                             beginAtZero: true, 
-                            max: 200, // 初始最大值設為 200，讓低污染區間更明顯
-                            ticks: {
-                                callback: function(value) {
-                                    return value;
-                                }
+                            max: 200, 
+                            title: {
+                                display: true,
+                                text: 'AQI Value (0-200)',
+                                color: '#4B5563'
                             },
-                            // 加入 AQI 等級的參考線 (Grid Lines)
                             grid: {
                                 color: function(context) {
-                                    if (context.tick.value === 50 || context.tick.value === 100 || context.tick.value === 150) {
-                                        return 'rgba(240, 173, 78, 0.7)'; // 突出顯示關鍵閾值
+                                    const value = context.tick.value;
+                                    if (value === 50 || value === 100 || value === 150 || value === 200) {
+                                        return 'rgba(0, 0, 0, 0.2)'; 
                                     }
                                     return 'rgba(0, 0, 0, 0.1)';
                                 },
-                                borderWidth: 1
+                                lineWidth: function(context) {
+                                    const value = context.tick.value;
+                                    return (value === 50 || value === 100 || value === 150 || value === 200) ? 1.5 : 1;
+                                }
                             }
                         },
                         x: { 
-                            title: { display: true, text: '時間' },
                             ticks: {
-                                maxRotation: 45, minRotation: 45,
-                                autoSkip: true,
-                                maxTicksLimit: 12, // 限制顯示的刻度數量
+                                maxRotation: 0, minRotation: 0,
+                                callback: function(value, index) {
+                                    const fullLabel = this.getLabelForValue(value);
+                                    const timePart = fullLabel.split(' ')[1];
+                                    return (index % 3 === 0) ? timePart : ''; 
+                                }
                             }
                         }
                     }
