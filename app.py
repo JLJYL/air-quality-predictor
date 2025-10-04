@@ -1,4 +1,4 @@
-# app.py - Final Final Revision (Fixed Timezone Error in Data Fetching)
+# app.py - FINAL FINAL REVISION (Hardened Timezone and Location Check)
 
 # =================================================================
 # Import all necessary libraries 
@@ -106,14 +106,16 @@ def get_location_meta(location_id: int):
 def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
     """
     Searches for the closest monitoring station using V3 API with simplified parameters.
+    硬性修正：強制使用 V3 API 要求的參數。
     """
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
-    # 修正: 移除了 order_by/sort, 確保 radius <= 25000
+    # 硬性修正: 確保 radius <= 25000，並只使用 V3 支援的參數
     params = {
         "coordinates": f"{lat},{lon}",
-        "radius": radius_km * 1000, 
+        "radius": 25000,  # 强制限制在 25km
         "limit": 5,
+        # 移除 order_by 和 sort 參數，因為 V3 API 不允許
     }
     
     try:
@@ -122,7 +124,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         results = r.json().get("results", [])
         
         if not results:
-            print("🚨 [Nearest] V3: No stations found within the specified radius.")
+            print("🚨 [Nearest] V3: No stations found within the specified radius (25km).")
             return None, None
             
         # V3 回傳的結果預設應該是按照距離排序的
@@ -400,7 +402,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 如果沒有時區，賦予 UTC
         last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
     else:
-        # 如果已經有時區，轉換為 UTC (避免 tz_localize 錯誤)
+        # 如果已經有時區，轉換為 UTC 
         last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
@@ -580,7 +582,7 @@ def index():
         CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
         
         if pd.notna(obs_time_val):
-            # 確保 time is tz-aware for display, then convert to local
+            # 確保 time is UTC-aware for display, then convert to local
             if obs_time_val.tz is None:
                  obs_time_val = obs_time_val.tz_localize('UTC')
             
@@ -600,9 +602,10 @@ def index():
         
         # 核心修正：安全地移除時區，為遞迴預測做準備
         dt_val = latest_row['datetime']
-        if dt_val.tz is not None:
-            # 確保移除時區時不會觸發 'Already tz-aware' 錯誤
-            dt_val = dt_val.tz_convert(None) 
+        
+        # 雙重檢查：確保移除時區時不會觸發 'Already tz-aware' 錯誤
+        if pd.to_datetime(dt_val).tz is not None:
+            dt_val = pd.to_datetime(dt_val).tz_convert(None) 
             
         observation_for_prediction['datetime'] = dt_val
         
@@ -640,7 +643,7 @@ def index():
             )
 
             # Convert UTC time to local time for display
-            # Note: future_predictions['datetime'] is UTC-aware because of predict_future_multi
+            # future_predictions['datetime'] is UTC-aware from predict_future_multi
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
             
             # Process NaN values and calculate Max AQI
