@@ -309,75 +309,68 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
 
 def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.DataFrame:
     """
-    Fetches the latest observation data from OpenAQ and converts it to a single-row wide format.
-    Includes final timezone logic to ensure 'datetime' is consistently UTC-aware.
+    Fetches the latest observation data from OpenAQ.
+    修正: 移除剛性時間匹配，直接選擇每個參數的絕對最新讀數。
     """
-    meta = get_location_meta(location_id)
-    if not meta or pd.isna(meta["last_utc"]):
-        return pd.DataFrame()
-
-    df_loc_latest = get_location_latest_df(location_id)
-    if df_loc_latest.empty:
-        return pd.DataFrame()
-
-    t_star_latest = df_loc_latest["ts_utc"].max()
-    t_star_loc = meta["last_utc"]
-    t_star = t_star_latest if pd.notna(t_star_latest) else t_star_loc
-
-    if pd.isna(t_star):
-        return pd.DataFrame()
     
-    # 1. Try primary source / strict tolerance
-    df_at_batch = pick_batch_near(df_loc_latest, t_star, TOL_MINUTES_PRIMARY)
-    if df_at_batch.empty:
-        # 2. Try primary source / fallback tolerance
-        df_at_batch = pick_batch_near(df_loc_latest, t_star, TOL_MINUTES_FALLBACK)
-
-    have = set(df_at_batch["parameter"].str.lower().tolist()) if not df_at_batch.empty else set()
-
-    # 3. Try to fetch missing parameters using dedicated parameter endpoint
-    missing = [p for p in target_params if p not in have]
-    df_param_batch = pd.DataFrame()
-    if missing:
-        df_param_latest = get_parameters_latest_df(location_id, missing)
-        df_param_batch = pick_batch_near(df_param_latest, t_star, TOL_MINUTES_PRIMARY)
-        if df_param_batch.empty:
-            df_param_batch = pick_batch_near(df_param_latest, t_star, TOL_MINUTES_FALLBACK)
-
-    frames = [df for df in [df_at_batch, df_param_batch] if not df.empty]
+    # 1. Fetch all 'latest' data from two main sources
+    df_loc_latest = get_location_latest_df(location_id)
+    df_param_latest = get_parameters_latest_df(location_id, target_params)
+    
+    # Combine all fetched data
+    frames = [df for df in [df_loc_latest, df_param_latest] if not df.empty]
     if not frames:
+        print("🚨 [Fetch] No pollutant data fetched from OpenAQ.")
         return pd.DataFrame()
 
     df_all = pd.concat(frames, ignore_index=True)
     df_all["parameter"] = df_all["parameter"].str.lower()
     df_all = df_all[df_all["parameter"].isin(target_params)]
-
-    # Final selection (ensure only one value per parameter)
-    df_all["dt_diff"] = (df_all["ts_utc"] - t_star).abs()
-    df_all = df_all.sort_values(["parameter", "dt_diff", "ts_utc"], ascending=[True, True, False])
+    
+    # 2. 核心修正：排序並選擇每個參數的絕對最新讀數
+    
+    # 確保 ts_utc 是 tz-aware
+    df_all["ts_utc"] = pd.to_datetime(df_all["ts_utc"], errors="coerce", utc=True)
+    df_all = df_all.dropna(subset=['ts_utc'])
+    
+    # 依參數排序，再依時間降序排序 (最新在前)
+    df_all = df_all.sort_values(["parameter", "ts_utc"], ascending=[True, False])
+    
+    # 選擇每個參數的第一筆 (即最新) 讀數
     df_all = df_all.drop_duplicates(subset=["parameter"], keep="first")
-    df_all = df_all.drop(columns=["dt_diff", "units", "ts_local"])
+    
+    # 3. 確保數據足夠新鮮 (防止模型從幾天前的數據開始預測)
+    three_hours_ago = datetime.now(timezone.utc) - timedelta(hours=3)
+    df_all = df_all[df_all["ts_utc"] > three_hours_ago].copy()
 
-    # 4. Convert to model input format (single-row wide table)
+    if df_all.empty:
+        print("🚨 [Fetch] No valid and recent observations found within the last 3 hours.")
+        return pd.DataFrame()
+        
+    # 4. 為最終的單行 DataFrame 確定一個統一的時間戳 (使用所有最新讀數中最新的那個)
+    latest_valid_ts = df_all["ts_utc"].max()
+    
+    # 移除不需要的輔助欄位
+    df_all = df_all.drop(columns=["units", "ts_local"])
+
+    # 5. 轉換為模型輸入格式 (單行寬表)
     observation = df_all.pivot_table(
-        index='ts_utc', columns='parameter', values='value', aggfunc='first'
-    ).reset_index()
+        index='parameter', columns='ts_utc', values='value', aggfunc='first'
+    ).T.reset_index()
+    
+    # 統一欄位名稱
     observation = observation.rename(columns={'ts_utc': 'datetime'})
     
-    # Calculate AQI
+    # 6. 計算 AQI 和最終時區處理
     if not observation.empty:
         observation['aqi'] = observation.apply(
             lambda row: calculate_aqi(row, target_params, is_pred=False), axis=1
         )
-        
-    # 核心修正：確保 'datetime' 總是 UTC-aware
-    if not observation.empty:
-        observation['datetime'] = pd.to_datetime(observation['datetime'])
+        # 確保 'datetime' 總是 UTC-aware (使用統一的最新時間)
+        observation['datetime'] = latest_valid_ts
         if observation['datetime'].dt.tz is None:
-             # 如果沒有時區，本地化為 UTC
              observation['datetime'] = observation['datetime'].dt.tz_localize('UTC')
         else:
-             # 如果已經有時區，轉換到 UTC (確保一致性)
              observation['datetime'] = observation['datetime'].dt.tz_convert('UTC')
 
     return observation
