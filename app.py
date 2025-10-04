@@ -1,4 +1,4 @@
-# app.py - FINAL PRODUCTION CODE (Global Auto-Selection & All Bug Fixes)
+# app.py - FINAL PRODUCTION CODE (Global Auto-Selection, All Bug Fixes, and Neutral N/A Display)
 
 # =================================================================
 # Import all necessary libraries 
@@ -60,7 +60,6 @@ CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
 
 # Dynamic Location Variables (Will be updated on startup and on each user request)
-# ⚠️ 這裡改為 None，以啟用中立回退機制
 current_location_id = None 
 current_location_name = "System Initializing..."
 
@@ -112,6 +111,7 @@ def get_nearest_location(lat: float, lon: float):
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
     # --- 搜尋階段設定 ---
+    # 修正半徑限制為 OpenAQ V3 允許的最大值 25000 米
     search_phases = [
         {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"}, 
         {"radius_m": 25000, "limit": 100, "name": "Fallback (25km/100)"}, 
@@ -136,7 +136,7 @@ def get_nearest_location(lat: float, lon: float):
                 print(f"🚨 [Nearest] Phase {phase['name']}: No stations found.")
                 continue 
 
-            # **【重要修改】**：不再檢查 PM2.5 屬性，直接選中第一個站點
+            # **【關鍵修正】**：不再檢查 PM2.5 屬性，直接選中第一個站點 (距離最近)
             nearest_loc = results[0] 
             loc_id = int(nearest_loc["id"])
             loc_name = nearest_loc["name"]
@@ -418,7 +418,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                              for col in feature_cols} 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
-    weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
+    weather_feature_names = [col for col in feature_cols if col in weather_feature_names_base]
     has_weather = bool(weather_feature_names)
 
     for h in range(hours):
@@ -583,6 +583,10 @@ def index():
     # === 獲取用戶座標或使用預設座標 ===
     user_lat = request.args.get('lat', type=float)
     user_lon = request.args.get('lon', type=float)
+    
+    # 用於 N/A 狀態顯示的座標
+    display_lat = user_lat if user_lat is not None else TARGET_LAT
+    display_lon = user_lon if user_lon is not None else TARGET_LON
 
     # 設置當前請求要使用的站點資訊 (預設使用全局變量)
     station_id = current_location_id
@@ -604,7 +608,7 @@ def index():
         else:
             # 找不到任何站點 (25km 半徑內)
             station_id = None
-            # 站名設置為一個中立的標籤，用於 No Data 回退
+            # 站名設置為一個中立的標籤，讓下面的 N/A 邏輯處理最終顯示名稱
             station_name = f"Location near {target_lat:.2f}, {target_lon:.2f}"
             print(f"⚠️ [Location] No station found near user. Entering 'No Data' mode.")
     
@@ -619,11 +623,12 @@ def index():
     # 3. 如果站點 ID 是 None (找不到任何站點)，則直接進入無法預測模式
     if station_id is None:
         max_aqi = "N/A"
-        # 站點名稱已經是中立標籤
+        # ⚠️ 這裡使用座標來顯示中立名稱
+        display_name = f"Location near {display_lat:.2f}, {display_lon:.2f} (No Data)"
         return render_template('index.html', 
                                 max_aqi=max_aqi, 
                                 aqi_predictions=[], 
-                                city_name=station_name, 
+                                city_name=display_name, 
                                 current_obs_time="N/A",
                                 is_fallback=True)
     
@@ -634,13 +639,13 @@ def index():
     if current_observation_raw.empty or 'pm25' not in current_observation_raw.columns or pd.isna(current_observation_raw['pm25'].iloc[0]):
         print(f"🚨 [Data Check] Station {station_name} (ID: {station_id}) was selected but did NOT return valid PM2.5 data. Falling back to 'No Data' mode.")
         
-        # 觸發「無數據」回退
-        station_name = f"{station_name} (PM2.5 Unavailable)"
+        # ⚠️ 【最終修正】：觸發「無數據」回退，強制使用座標作為站名
+        display_name = f"Location near {display_lat:.2f}, {display_lon:.2f} (No Data)"
         max_aqi = "N/A"
         return render_template('index.html', 
                                 max_aqi=max_aqi, 
                                 aqi_predictions=[], 
-                                city_name=station_name, 
+                                city_name=display_name, # 例如: "Location near 24.18, 120.68 (No Data)"
                                 current_obs_time="N/A",
                                 is_fallback=True)
         
@@ -749,11 +754,15 @@ def index():
                  'is_obs': True 
                }]
 
-    # 6. Render template
+    # 6. Render template - 使用動態站名或中立座標名稱
+    display_city_name = station_name
+    if is_fallback_mode and (station_id is None or current_observation_raw.empty or 'pm25' not in current_observation_raw.columns):
+         display_city_name = f"Location near {display_lat:.2f}, {display_lon:.2f} (No Data)"
+
     return render_template('index.html', 
                             max_aqi=max_aqi, 
                             aqi_predictions=aqi_predictions, 
-                            city_name=station_name, # Use the dynamically found location name
+                            city_name=display_city_name,
                             current_obs_time=CURRENT_OBSERVATION_TIME,
                             is_fallback=is_fallback_mode)
 
