@@ -1,4 +1,4 @@
-# app.py - Final Revision (English Version with Dynamic Location)
+# app.py - Final Revision (Fixed 422 API Error and Timezone Error)
 
 # =================================================================
 # Import all necessary libraries 
@@ -29,9 +29,10 @@ META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
 # ⚠️ Replace with your own API Key
 API_KEY = "fb579916623e8483cd85344b14605c3109eea922202314c44b87a2df3b1fff77" 
 HEADERS = {"X-API-Key": API_KEY}
+# BASE V3
 BASE = "https://api.openaq.org/v3"
 
-# Target geographical coordinates (near Qianjin District, Kaohsiung)
+# Target geographical coordinates (Still using Kaohsiung for consistency with the log)
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
@@ -70,7 +71,6 @@ LAG_HOURS = [1, 2, 3, 6, 12, 24]
 ROLLING_WINDOWS = [6, 12, 24]
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] 
 
-# Simplified AQI Breakpoints
 AQI_BREAKPOINTS = {
     "pm25": [(0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150), (55.5, 150.4, 151, 200)],
     "pm10": [(0, 54, 0, 50), (55, 154, 51, 100), (155, 254, 101, 150), (255, 354, 151, 200)],
@@ -86,77 +86,75 @@ AQI_BREAKPOINTS = {
 # =================================================================
 
 def get_location_meta(location_id: int):
-    """Fetches location metadata including the last update time."""
+    """Fetches location metadata including the last update time (Uses V3)."""
     try:
         r = requests.get(f"{BASE}/locations/{location_id}", headers=HEADERS, timeout=10)
         r.raise_for_status()
         row = r.json()["results"][0]
         last_utc = pd.to_datetime(row["datetimeLast"]["utc"], errors="coerce", utc=True)
-        # last_local = row["datetimeLast"]["local"] # Not used for core logic
         return {
             "id": int(row["id"]),
             "name": row["name"],
             "last_utc": last_utc,
-            # "last_local": last_local,
         }
     except Exception as e:
-        # print(f"Error fetching location meta for {location_id}: {e}")
         return None
 
 # =================================================================
-# NEW: Function to get the nearest location (FIXED API PARAMETERS)
+# 核心修正: V3 API 穩健定位函式 (修正 422 錯誤)
 # =================================================================
-def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
+def get_nearest_location(lat: float, lon: float, radius_km: int = 25): # ⚠️ 修正: radius_km 最大值為 25
     """
-    Searches for the closest monitoring station on OpenAQ based on coordinates.
-    Filters for stations that provide 'pm25' data by checking results.
+    Searches for the closest monitoring station using V3 API with simplified parameters.
     """
+    V3_LOCATIONS_URL = f"{BASE}/locations" 
+    
+    # 修正: 移除了 order_by/sort, 確保 radius <= 25000
     params = {
         "coordinates": f"{lat},{lon}",
-        "radius": radius_km * 1000, # convert to meters
+        "radius": radius_km * 1000, 
         "limit": 5,
-        # ⚠️ REMOVED "parameter_id": 2 to fix the 422 Client Error
-        "order_by": "distance",
-        "sort": "asc"
     }
     
     try:
-        r = requests.get(f"{BASE}/locations", headers=HEADERS, params=params, timeout=10)
+        r = requests.get(V3_LOCATIONS_URL, headers=HEADERS, params=params, timeout=10)
         r.raise_for_status()
         results = r.json().get("results", [])
         
         if not results:
-            print("🚨 [Nearest] No stations found within the specified radius.")
+            print("🚨 [Nearest] V3: No stations found within the specified radius.")
             return None, None
             
-        # Filter for the nearest station that offers pm25 data
-        valid_stations = [
-            loc for loc in results 
-            if any(p.get("id") == 2 or p.get("name") == "pm25" for p in loc.get("parameters", []))
-        ]
-        
-        if not valid_stations:
-            print("🚨 [Nearest] Found stations, but none offer PM2.5 data. Using the closest one as fallback.")
-            nearest_loc = results[0] # Use the absolute closest as a last resort
-        else:
-            nearest_loc = valid_stations[0] # Use the closest one with PM2.5
+        # V3 回傳的結果預設應該是按照距離排序的
+        # 篩選出第一個提供 PM2.5 數據的站點
+        for nearest_loc in results:
+            # 檢查該站點的 parameters 列表是否包含 PM2.5 (ID: 2 或 name: pm25)
+            # 注意：V3 API 回傳的 parameter.name 是大寫，故使用 .lower()
+            has_pm25 = any(p.get("id") == 2 or p.get("name").lower() == "pm25" for p in nearest_loc.get("parameters", []))
             
-        loc_id = int(nearest_loc["id"])
-        loc_name = nearest_loc["name"]
+            if has_pm25:
+                loc_id = int(nearest_loc["id"])
+                loc_name = nearest_loc["name"]
+                print(f"✅ [Nearest] V3: Successfully found nearest station: {loc_name} (ID: {loc_id})")
+                return loc_id, loc_name
         
-        print(f"✅ [Nearest] Successfully found nearest station: {loc_name} (ID: {loc_id})")
-        return loc_id, loc_name
+        # 如果前 5 個站點都沒有 PM2.5，則回傳 None
+        print("🚨 [Nearest] V3: Found stations, but none of the nearest 5 offer PM2.5 data.")
+        return None, None
 
     except Exception as e:
-        print(f"❌ [Nearest] Failed to search for the nearest station: {r.status_code} {r.text if 'r' in locals() else ''} Error: {e}")
+        status_code = r.status_code if 'r' in locals() else 'N/A'
+        # 輸出詳細的 422 錯誤訊息
+        error_detail = r.text if 'r' in locals() else str(e)
+        print(f"❌ [Nearest] V3: Failed to search for the nearest station. Status: {status_code}. Details: {error_detail}")
         return None, None
         
 # -----------------------------------------------------------------
-# Core Data Fetching Logic (kept for robustness)
+# Core Data Fetching Logic (All use V3 BASE)
 # -----------------------------------------------------------------
 
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
-    """Fetches the 'latest' values for all parameters at a location."""
+    """Fetches the 'latest' values for all parameters at a location (Uses V3)."""
     try:
         r = requests.get(f"{BASE}/locations/{location_id}/latest", headers=HEADERS, params={"limit": 1000}, timeout=10)
         if r.status_code == 404:
@@ -193,7 +191,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
-    """Fetches 'latest' value for specific parameters using the /parameters/{pid}/latest endpoint."""
+    """Fetches 'latest' value for specific parameters (Uses V3)."""
     rows = []
     try:
         for p in target_params:
@@ -238,6 +236,9 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
+
+# ... (pick_batch_near, fetch_latest_observation_data, calculate_aqi_sub_index, calculate_aqi, load_models_and_metadata, initialize_location, index remains the same) ...
+
 
 def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> pd.DataFrame:
     """Selects the batch of data closest to t_ref and within tol_minutes."""
@@ -334,10 +335,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     return observation
 
 
-# =================================================================
-# Helper Functions: AQI Calculation
-# =================================================================
-
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     """Calculates the AQI sub-index (I) for a single pollutant concentration."""
     if pd.isna(concentration) or concentration < 0:
@@ -383,14 +380,20 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# Prediction Function
+# 核心修正: 預測函式 (修正時區錯誤)
 # =================================================================
-
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
     predictions = []
 
-    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_localize('UTC')
+    # 核心修正：避免 'Already tz-aware' 錯誤
+    last_data['datetime'] = pd.to_datetime(last_data['datetime'])
+    if last_data['datetime'].dt.tz is None:
+        # 如果沒有時區，賦予 UTC
+        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
+    else:
+        # 如果已經有時區，轉換為 UTC
+        last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
@@ -475,7 +478,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# Model Loading Logic
+# Model Loading Logic (Remains the same)
 # =================================================================
 
 def load_models_and_metadata():
@@ -525,7 +528,7 @@ def load_models_and_metadata():
         POLLUTANT_PARAMS = []
 
 # =================================================================
-# Flask Application Setup and Initialization
+# Flask Application Setup and Initialization (Remains the same)
 # =================================================================
 
 def initialize_location():
@@ -587,6 +590,7 @@ def index():
         latest_row = current_observation_raw.iloc[0]
         
         # Ensure 'datetime' has no timezone for recursive prediction function logic
+        # Note: This is necessary because predict_future_multi handles the timezone
         dt_val = latest_row['datetime']
         if dt_val.tz is not None:
             dt_val = dt_val.tz_localize(None)
@@ -602,7 +606,6 @@ def index():
         # Check if all required features are present
         if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
              is_valid_for_prediction = True
-             # print("✅ [Request] Data prepared, ready for prediction.")
         else:
              print("⚠️ [Request] Missing required feature columns after integration, falling back.")
     else:
@@ -618,11 +621,7 @@ def index():
     if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
         try:
             
-            # Final timezone check
-            observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-            if observation_for_prediction['datetime'].dt.tz is not None:
-                 observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize(None) # Remove timezone for input
-
+            # The final time zone handling is done within predict_future_multi
             future_predictions = predict_future_multi(
                 TRAINED_MODELS,
                 observation_for_prediction,
