@@ -3,9 +3,8 @@
 # =================================================================
 import requests
 import pandas as pd
-# FIX: Consolidated imports from the datetime module for correct access to datetime.now()
-# 原始的 'import datetime' 導致衝突，現在直接導入所需的類別和函數。
-from datetime import datetime, timedelta, timezone 
+# 修正：將 datetime 類別導入為 dt，以避免與 datetime 模組本身的命名衝突
+from datetime import datetime as dt, timedelta, timezone 
 import re
 import os
 import warnings
@@ -303,8 +302,8 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     df_all = df_all.drop_duplicates(subset=["parameter"], keep="first")
     
     # 確保數據足夠新鮮 (只使用 3 小時內的數據)
-    # 修正了錯誤：現在使用 datetime.now() 類別方法
-    three_hours_ago = datetime.now(timezone.utc) - timedelta(hours=3)
+    # 修正了錯誤：現在使用 dt.now() (類別方法)
+    three_hours_ago = dt.now(timezone.utc) - timedelta(hours=3)
     df_all = df_all[df_all["ts_utc"] > three_hours_ago].copy()
 
     if df_all.empty:
@@ -453,8 +452,8 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
             # 將新的預測值設置為 1 小時滯後特徵 (param_lag_1h)
-            if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
-                current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+            if f'{param}_lag_{1}h' in current_data_dict and param in new_pollutant_values:
+                current_data_dict[f'{param}_lag_{1}h'] = new_pollutant_values[param]
 
     return pd.DataFrame(predictions)
 
