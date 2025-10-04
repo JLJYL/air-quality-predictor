@@ -2,7 +2,6 @@
 
 # =================================================================
 # Import all necessary libraries 
-# 🚨 確保這裡有導入 request，用於獲取用戶座標
 # =================================================================
 import requests
 import pandas as pd
@@ -15,7 +14,7 @@ import numpy as np
 import xgboost as xgb
 import json
 from datetime import timedelta, timezone
-from flask import Flask, render_template, request # <--- 已添加 request 導入
+from flask import Flask, render_template, request # <--- 確保 request 已導入
 
 # Ignore warnings
 warnings.filterwarnings('ignore')
@@ -103,20 +102,23 @@ def get_location_meta(location_id: int):
 
 # =================================================================
 # V3 API Global Auto-Selection Function
+# 🚨 修正了 Fallback 階段的半徑限制
 # =================================================================
 def get_nearest_location(lat: float, lon: float): 
     """
     Searches for the closest monitoring station in two phases:
     1. Strict search (25km radius, top 5 results).
-    2. Fallback search (100km radius, up to 100 results) to find any available PM2.5 station.
+    2. Fallback search (25km radius, top 100 results) due to OpenAQ API constraints.
     """
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
     # --- 搜尋階段設定 ---
-    # (Radius is in meters for V3 API)
+    # OpenAQ V3 API 限制 radius 最大為 25000 公尺
     search_phases = [
-        {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"},
-        {"radius_m": 100000, "limit": 100, "name": "Fallback (100km/100)"},
+        # Phase 1: 嚴格搜尋 25km 內 PM2.5 站點 (Limit 5)
+        {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"}, 
+        # Phase 2: Fallback 搜尋，仍使用最大半徑 25km，但增加 Limit 到 100
+        {"radius_m": 25000, "limit": 100, "name": "Fallback (25km/100)"}, 
     ]
 
     for phase in search_phases:
@@ -155,7 +157,7 @@ def get_nearest_location(lat: float, lon: float):
                  # Continue to the next phase
                  
         except Exception as e:
-            # Added more robust error logging to catch 422 if it somehow returns
+            # 捕獲並打印錯誤（例如 422 狀態碼，如果限制改變）
             status_code = r.status_code if 'r' in locals() else 'N/A'
             error_detail = r.text if 'r' in locals() else str(e)
             print(f"❌ [Nearest] Phase {phase['name']}: Failed to search. Status: {status_code}. Details: {error_detail}")
@@ -591,14 +593,16 @@ def index():
     user_lat = request.args.get('lat', type=float)
     user_lon = request.args.get('lon', type=float)
 
+    # 設置當前請求要使用的站點資訊 (預設使用全局變量)
+    current_location_id_to_use = current_location_id
+    current_location_name_to_use = current_location_name
+
     if user_lat is None or user_lon is None:
         # 1. 如果 URL 參數中沒有座標 (用戶第一次進入或拒絕定位)
         target_lat = TARGET_LAT
         target_lon = TARGET_LON
-        # ⚠️ 此時直接使用當前 global 的 current_location_id，它應當是 startup 階段找到的最近站點
-        # 避免在每次拒絕定位時都重新搜尋
         
-        print(f"⚠️ [Location] No user coordinates found. Using current station: {current_location_name}")
+        print(f"⚠️ [Location] No user coordinates found. Using current station: {current_location_name_to_use}")
         
     else:
         # 2. 如果成功獲取到用戶的即時座標，則用此座標進行站點搜尋
@@ -611,24 +615,21 @@ def index():
         loc_id, loc_name = get_nearest_location(target_lat, target_lon)
         
         if loc_id is not None:
-            # 找到新的最近站點，更新 global 變數
-            current_location_id = loc_id
-            current_location_name = loc_name
+            # 找到新的最近站點，更新當前請求使用的站點資訊
+            current_location_id_to_use = loc_id
+            current_location_name_to_use = loc_name
         else:
             # 即使有用戶座標，但附近找不到任何 PM2.5 站點，則使用硬編碼的最終回退站點 (前金)
-            # 這裡不更新 global current_location_id 以避免汙染全局狀態，但仍然使用回退值
             current_location_id_to_use = DEFAULT_LOCATION_ID
             current_location_name_to_use = DEFAULT_LOCATION_NAME
             print(f"⚠️ [Location] No PM2.5 station found near user, falling back to: {current_location_name_to_use}")
             
-            # 使用回退值進行當前請求的數據獲取
-            current_location_id = current_location_id_to_use 
-            current_location_name = current_location_name_to_use
-            
-    station_name = current_location_name
+    # 使用當前請求確認的站點資訊
+    station_id = current_location_id_to_use
+    station_name = current_location_name_to_use
     
     # 1. Attempt to fetch the latest observation data in real-time
-    current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
+    current_observation_raw = fetch_latest_observation_data(station_id, POLLUTANT_TARGETS)
 
     # Extract the latest observed AQI for fallback
     if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
@@ -755,11 +756,10 @@ def index():
     return render_template('index.html', 
                             max_aqi=max_aqi, 
                             aqi_predictions=aqi_predictions, 
-                            city_name=current_location_name, # Use the dynamically found location name
+                            city_name=station_name, # Use the dynamically found location name
                             current_obs_time=CURRENT_OBSERVATION_TIME,
                             is_fallback=is_fallback_mode)
 
 if __name__ == '__main__':
     # When running locally, Flask usually uses port 5000. 
-    # For Render deployment, gunicorn handles the port (10000).
     app.run(debug=True)
