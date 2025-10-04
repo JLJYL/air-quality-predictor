@@ -1,7 +1,8 @@
-# app.py - FINAL PRODUCTION CODE (Global Auto-Selection, All Bug Fixes, and Neutral N/A Display)
+# app.py - FINAL PRODUCTION CODE (Forcing Geo-Closest Selection)
 
 # =================================================================
 # Import all necessary libraries 
+# ... (其他 imports 保持不變)
 # =================================================================
 import requests
 import pandas as pd
@@ -48,6 +49,7 @@ TOL_MINUTES_FALLBACK = 60
 
 # =================================================================
 # Global Variables (Mutable)
+# ... (Global Variables 保持不變)
 # =================================================================
 TRAINED_MODELS = {} 
 LAST_OBSERVATION = None 
@@ -65,6 +67,7 @@ current_location_name = "System Initializing..."
 
 # =================================================================
 # Constants
+# ... (Constants 保持不變)
 # =================================================================
 LOCAL_TZ = "Asia/Taipei"
 LAG_HOURS = [1, 2, 3, 6, 12, 24]
@@ -83,8 +86,8 @@ AQI_BREAKPOINTS = {
 
 # =================================================================
 # OpenAQ Data Fetching Functions
+# ... (get_location_meta 保持不變)
 # =================================================================
-
 def get_location_meta(location_id: int):
     """Fetches location metadata including the last update time (Uses V3)."""
     try:
@@ -101,64 +104,48 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# V3 API Global Auto-Selection Function - 已移除 PM2.5 篩選
+# V3 API Global Auto-Selection Function - 最終版本：強制選擇地理最近站點
 # =================================================================
 def get_nearest_location(lat: float, lon: float): 
     """
-    Searches for the closest monitoring station in two phases.
-    Filters PM2.5 availability only AFTER fetching the actual data (in index route).
+    Searches for the single closest monitoring station by geography, ignoring data validity/activity.
     """
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
-    # --- 搜尋階段設定 ---
-    # 修正半徑限制為 OpenAQ V3 允許的最大值 25000 米
-    search_phases = [
-        {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"}, 
-        {"radius_m": 25000, "limit": 100, "name": "Fallback (25km/100)"}, 
-    ]
-
-    for phase in search_phases:
-        radius_m = phase["radius_m"]
-        limit = phase["limit"]
+    # --- 搜尋參數設定：只保留座標，強制 OpenAQ 找到「物理上最近」的站點 ---
+    params = {
+        "coordinates": f"{lat},{lon}",
+        # ⚠️ 關鍵：移除 "radius" 和 "limit" 參數，以最大限度地確保地理最近站點被選中
+    }
+    
+    try:
+        r = requests.get(V3_LOCATIONS_URL, headers=HEADERS, params=params, timeout=10)
+        r.raise_for_status()
+        results = r.json().get("results", [])
         
-        params = {
-            "coordinates": f"{lat},{lon}",
-            "radius": radius_m, 
-            "limit": limit,
-        }
+        if not results:
+            print(f"🚨 [Nearest] No station found globally for coordinates.")
+            return None, None
+
+        # 選擇結果列表中的第一個站點 (OpenAQ 預設按距離排序)
+        nearest_loc = results[0] 
+        loc_id = int(nearest_loc["id"])
+        loc_name = nearest_loc["name"]
         
-        try:
-            r = requests.get(V3_LOCATIONS_URL, headers=HEADERS, params=params, timeout=10)
-            r.raise_for_status()
-            results = r.json().get("results", [])
-            
-            if not results:
-                print(f"🚨 [Nearest] Phase {phase['name']}: No stations found.")
-                continue 
-
-            # **【關鍵修正】**：不再檢查 PM2.5 屬性，直接選中第一個站點 (距離最近)
-            nearest_loc = results[0] 
-            loc_id = int(nearest_loc["id"])
-            loc_name = nearest_loc["name"]
-            
-            print(f"✅ [Nearest] Phase {phase['name']}: Found the closest station: {loc_name} (ID: {loc_id}).")
-            return loc_id, loc_name
-                 
-        except Exception as e:
-            status_code = r.status_code if 'r' in locals() else 'N/A'
-            error_detail = r.text if 'r' in locals() else str(e)
-            print(f"❌ [Nearest] Phase {phase['name']}: Failed to search. Status: {status_code}. Details: {error_detail}")
-            continue 
-
-    # 如果所有階段都失敗，則回傳 None
-    return None, None
+        print(f"✅ [Nearest] Found the ABSOLUTELY closest station: {loc_name} (ID: {loc_id}).")
+        return loc_id, loc_name
+             
+    except Exception as e:
+        status_code = r.status_code if 'r' in locals() else 'N/A'
+        error_detail = r.text if 'r' in locals() else str(e)
+        print(f"❌ [Nearest] Failed to search for closest station. Status: {status_code}. Details: {error_detail}")
+        return None, None
         
 # -----------------------------------------------------------------
-# Core Data Fetching Logic (All use V3 BASE)
+# Core Data Fetching Logic (get_location_latest_df, get_parameters_latest_df 保持不變)
 # -----------------------------------------------------------------
-
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
-    """Fetches the 'latest' values for all parameters at a location (Uses V3)."""
+    # ... (函數內容保持不變)
     try:
         r = requests.get(f"{BASE}/locations/{location_id}/latest", headers=HEADERS, params={"limit": 1000}, timeout=10)
         if r.status_code == 404:
@@ -195,7 +182,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
-    """Fetches 'latest' value for specific parameters (Uses V3)."""
+    # ... (函數內容保持不變)
     rows = []
     try:
         for p in target_params:
@@ -243,11 +230,11 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 
 
 # =================================================================
-# Helper Functions: AQI Calculation and Data Wrangling
+# Helper Functions: AQI Calculation and Data Wrangling (保持不變)
+# ...
 # =================================================================
-
 def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> pd.DataFrame:
-    """Selects the batch of data closest to t_ref and within tol_minutes."""
+    # ... (函數內容保持不變)
     if df.empty or pd.isna(t_ref):
         return pd.DataFrame()
 
@@ -274,10 +261,7 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
 
 
 def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.DataFrame:
-    """
-    Fetches the latest observation data from OpenAQ and converts it to a single-row wide format.
-    Includes final timezone logic to ensure 'datetime' is consistently UTC-aware.
-    """
+    # ... (函數內容保持不變)
     meta = get_location_meta(location_id)
     if not meta or pd.isna(meta["last_utc"]):
         return pd.DataFrame()
@@ -350,7 +334,7 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
 
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
-    """Calculates the AQI sub-index (I) for a single pollutant concentration."""
+    # ... (函數內容保持不變)
     if pd.isna(concentration) or concentration < 0:
         return np.nan
 
@@ -378,7 +362,7 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     return np.nan
 
 def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
-    """Calculates the final AQI based on multiple pollutant concentrations (max sub-index)."""
+    # ... (函數內容保持不變)
     sub_indices = []
     for p in params:
         col_name = f'{p}_pred' if is_pred else p
@@ -394,7 +378,8 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# Prediction Function (Timezone Aware)
+# Prediction Function (Timezone Aware) (保持不變)
+# ...
 # =================================================================
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
@@ -492,9 +477,9 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# Model Loading Logic
+# Model Loading Logic (保持不變)
+# ...
 # =================================================================
-
 def load_models_and_metadata():
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
 
@@ -542,7 +527,8 @@ def load_models_and_metadata():
         POLLUTANT_PARAMS = []
 
 # =================================================================
-# Flask Application Setup and Initialization
+# Flask Application Setup and Initialization (保持不變)
+# ...
 # =================================================================
 
 def initialize_location_on_startup():
@@ -556,15 +542,15 @@ def initialize_location_on_startup():
     loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
     
     if loc_id is not None:
-        # 找到站點，但我們還不能確定它有 PM2.5，先選中它
+        # 找到站點
         current_location_id = loc_id
         current_location_name = loc_name
         print(f"✅ [Startup] Found a potential station: {current_location_name} (ID: {current_location_id})")
     else:
-        # 找不到任何站點 (25km 半徑內)
+        # 找不到任何站點 (極少發生，除非 OpenAQ 全球都找不到站點)
         current_location_id = None
-        current_location_name = "Default (No Station Found Near Target)"
-        print(f"⚠️ [Startup] No station found near default location. Initializing to 'None' station ID.")
+        current_location_name = "Default (No Station Found Globally)"
+        print(f"⚠️ [Startup] No station found globally. Initializing to 'None' station ID.")
 
 # Dynamically find the nearest location for the server's initial run
 initialize_location_on_startup()
@@ -599,6 +585,7 @@ def index():
         
         print(f"✅ [Location] Using User Coordinates: LAT={target_lat}, LON={target_lon}")
         
+        # 呼叫新的 get_nearest_location 函數，它只找地理最近
         loc_id, loc_name = get_nearest_location(target_lat, target_lon)
         
         if loc_id is not None:
@@ -606,9 +593,8 @@ def index():
             station_id = loc_id
             station_name = loc_name
         else:
-            # 找不到任何站點 (25km 半徑內)
+            # 找不到任何站點 (極少發生)
             station_id = None
-            # 站名設置為一個中立的標籤，讓下面的 N/A 邏輯處理最終顯示名稱
             station_name = f"Location near {target_lat:.2f}, {target_lon:.2f}"
             print(f"⚠️ [Location] No station found near user. Entering 'No Data' mode.")
     
@@ -623,7 +609,7 @@ def index():
     # 3. 如果站點 ID 是 None (找不到任何站點)，則直接進入無法預測模式
     if station_id is None:
         max_aqi = "N/A"
-        # ⚠️ 這裡使用座標來顯示中立名稱
+        # 這裡使用座標來顯示中立名稱
         display_name = f"Location near {display_lat:.2f}, {display_lon:.2f} (No Data)"
         return render_template('index.html', 
                                 max_aqi=max_aqi, 
@@ -635,7 +621,7 @@ def index():
     # 4. 嘗試獲取最新的觀測數據
     current_observation_raw = fetch_latest_observation_data(station_id, POLLUTANT_TARGETS)
 
-    # **【重要檢查】**：檢查獲取的實際數據中是否包含 PM2.5
+    # **【重要檢查】**：檢查獲取的實際數據中是否包含 PM2.5 (這是唯一能判斷數據是否有效的檢查)
     if current_observation_raw.empty or 'pm25' not in current_observation_raw.columns or pd.isna(current_observation_raw['pm25'].iloc[0]):
         print(f"🚨 [Data Check] Station {station_name} (ID: {station_id}) was selected but did NOT return valid PM2.5 data. Falling back to 'No Data' mode.")
         
@@ -757,6 +743,7 @@ def index():
     # 6. Render template - 使用動態站名或中立座標名稱
     display_city_name = station_name
     if is_fallback_mode and (station_id is None or current_observation_raw.empty or 'pm25' not in current_observation_raw.columns):
+         # 使用中立座標名稱
          display_city_name = f"Location near {display_lat:.2f}, {display_lon:.2f} (No Data)"
 
     return render_template('index.html', 
