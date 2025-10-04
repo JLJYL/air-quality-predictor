@@ -1,4 +1,4 @@
-# app.py - FINAL FINAL REVISION (Hardened Timezone, Location Check, and Historical Weather Trend)
+# app.py - FINAL FINAL REVISION (Hardened Timezone and Location Check)
 
 # =================================================================
 # Import all necessary libraries 
@@ -16,17 +16,17 @@ import json
 from datetime import timedelta, timezone
 from flask import Flask, render_template
 
-# Ignore warnings 
+# Ignore warnings
 warnings.filterwarnings('ignore')
 
-# Model and metadata paths 
+# Model and metadata paths
 MODELS_DIR = 'models'
 META_PATH = os.path.join(MODELS_DIR, 'model_meta.json')
 
 # =================================================================
 # OpenAQ API Constants
 # =================================================================
-# ⚠️ Replace with your own API Key 
+# ⚠️ Replace with your own API Key
 API_KEY = "fb579916623e8483cd85344b14605c3109eea922202314c44b87a2df3b1fff77" 
 HEADERS = {"X-API-Key": API_KEY}
 # BASE V3
@@ -113,7 +113,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
     # 硬性修正: 確保 radius <= 25000，並只使用 V3 支援的參數
     params = {
         "coordinates": f"{lat},{lon}",
-        "radius": 25000, # 强制限制在 25km
+        "radius": 25000,  # 强制限制在 25km
         "limit": 5,
         # 移除 order_by 和 sort 參數，因為 V3 API 不允許
     }
@@ -138,7 +138,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
                 loc_name = nearest_loc["name"]
                 print(f"✅ [Nearest] V3: Successfully found nearest station: {loc_name} (ID: {loc_id})")
                 return loc_id, loc_name
-            
+        
         # 如果前 5 個站點都沒有 PM2.5，則回傳 None
         print("🚨 [Nearest] V3: Found stations, but none of the nearest 5 offer PM2.5 data.")
         return None, None
@@ -236,44 +236,6 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
-
-
-# =================================================================
-# NEW: Fetch Latest Weather Observation (Meteostat Concept)
-# We use Open-Meteo's Current Weather API to SIMULATE a robust latest observation source
-# that provides temperature, humidity, and pressure without an API key,
-# as a proxy for the latest Meteostat-like data.
-# ================================================================= 
-
-def fetch_latest_weather_observation(lat: float, lon: float) -> dict:
-    """Fetches the latest (T=0) weather observation data (temperature, humidity, pressure)."""
-    OM_CURRENT_URL = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,pressure_msl",
-        "timezone": "UTC"
-    }
-
-    try:
-        r = requests.get(OM_CURRENT_URL, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        current = data.get("current", {})
-        
-        if not current:
-            return {}
-
-        return {
-            'datetime': pd.to_datetime(current.get('time'), utc=True),
-            'temperature': current.get('temperature_2m'),
-            'humidity': current.get('relative_humidity_2m'),
-            'pressure': current.get('pressure_msl'),
-        }
-    
-    except Exception as e:
-        print(f"❌ [Weather Obs] Failed to fetch latest observation: {e}")
-        return {}
 
 
 # =================================================================
@@ -428,7 +390,7 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# Prediction Function (使用歷史平均趨勢替換隨機漫步)
+# Prediction Function (修正時區錯誤)
 # =================================================================
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
@@ -444,25 +406,16 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
-    start_hour = last_datetime_aware.hour # 取得起始觀測時間的小時數
     
     # Initialize features dictionary from the last observation
     current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
-                              if col in last_data.columns and not last_data[col].empty 
-                              else np.nan 
-                              for col in feature_cols} 
+                             if col in last_data.columns and not last_data[col].empty 
+                             else np.nan 
+                             for col in feature_cols} 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
     has_weather = bool(weather_feature_names)
-    
-    # --- NEW: 擷取 T=0 的氣象觀測值作為基準 ---
-    # 這是為了讓預測週期能以最新的 T=0 觀測值為起點
-    start_weather_obs = {}
-    for w_col in weather_feature_names:
-        # 使用 current_data_dict 中儲存的 T=0 值
-        start_weather_obs[w_col] = current_data_dict.get(w_col) or np.nan
-    # -------------------------------------------------------------
 
     for h in range(hours):
         future_time = last_datetime_aware + timedelta(hours=h + 1)
@@ -479,46 +432,19 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
         pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-        # 2. Simulate future weather changes (使用歷史平均趨勢)
+        # 2. Simulate future weather changes (simple random walk for features without forecasts)
         if has_weather:
-            future_hour = future_time.hour
-            
-            # --- 週期趨勢計算 (模擬歷史平均趨勢) ---
-            # 溫度: 假設日週期振幅 4°C, 高峰在下午 14:00 (歷史數據模擬)
-            temp_swing_factor = np.cos(2 * np.pi * (future_hour - 14) / 24)
-            
-            # 濕度: 假設日週期振幅 5%, 高峰在早上 06:00 (歷史數據模擬)
-            humid_swing_factor = np.cos(2 * np.pi * (future_hour - 6) / 24)
-            
-            # 氣壓: 由於日週期不顯著，使用 T=0 觀測值並加入輕微隨機波動
-            np.random.seed(future_time.hour + future_time.day + 42) # 保持部分隨機性
-            # ---------------------------------------------
-            
+            # Seed for deterministic simulation across features for the same hour
+            np.random.seed(future_time.hour + future_time.day + 42) 
             for w_col in weather_feature_names:
-                start_value = start_weather_obs.get(w_col)
-                
-                if pd.isna(start_value):
-                    new_weather_value = np.nan
-                elif w_col == 'temperature':
-                    # 獲取 T=0 時，觀測值在日週期中的「位置」
-                    start_factor = np.cos(2 * np.pi * (start_hour - 14) / 24)
-                    
-                    # 預測值 = T=0 觀測值 + (未來時間的趨勢因子 - T=0 時間的趨勢因子) * 振幅
-                    temp_change = 4 * (temp_swing_factor - start_factor)
-                    new_weather_value = start_value + temp_change
-                    
-                elif w_col == 'humidity':
-                    start_factor = np.cos(2 * np.pi * (start_hour - 6) / 24)
-                    humid_change = 5 * (humid_swing_factor - start_factor)
-                    new_weather_value = start_value + humid_change
-                    
-                elif w_col == 'pressure':
-                    # 使用 T=0 觀測值 + 輕微隨機波動 (避免完全平坦)
-                    new_weather_value = start_value + np.random.normal(0, 0.2)
-                
-                # 更新特徵並將其用於下一個小時的遞歸輸入
-                pred_features[w_col] = new_weather_value
-                current_data_dict[w_col] = new_weather_value
+                base_value = current_data_dict.get(w_col)
+                if base_value is not None and pd.notna(base_value):
+                    new_weather_value = base_value + np.random.normal(0, 0.5) 
+                    pred_features[w_col] = new_weather_value
+                    current_data_dict[w_col] = new_weather_value 
+                else:
+                    pred_features[w_col] = np.nan
+                    current_data_dict[w_col] = np.nan 
 
 
         current_prediction_row = {'datetime': future_time}
@@ -648,9 +574,6 @@ def index():
     # 1. Attempt to fetch the latest observation data in real-time
     current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
 
-    # NEW STEP: Fetch latest weather observation (T=0)
-    latest_weather_obs = fetch_latest_weather_observation(TARGET_LAT, TARGET_LON)
-
     # Extract the latest observed AQI for fallback
     if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
         obs_aqi_val = current_observation_raw['aqi'].iloc[0]
@@ -682,21 +605,16 @@ def index():
         
         # 雙重檢查：確保移除時區時不會觸發 'Already tz-aware' 錯誤
         if pd.to_datetime(dt_val).tz is not None:
-             dt_val = pd.to_datetime(dt_val).tz_convert(None) 
-             
+            dt_val = pd.to_datetime(dt_val).tz_convert(None) 
+            
         observation_for_prediction['datetime'] = dt_val
         
-        # Update current pollutant and AQI values (non-lag/non-rolling)
+        # Update current values and features (non-lag/non-rolling)
         for col in latest_row.index:
             if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
-                 if col in POLLUTANT_TARGETS or col == 'aqi':
+                 if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
                       observation_for_prediction[col] = latest_row[col]
-
-        # NEW LOGIC: Update current weather values from latest observation
-        for w_col, w_val in latest_weather_obs.items():
-             if w_col in ['temperature', 'humidity', 'pressure'] and w_col in observation_for_prediction.columns:
-                  observation_for_prediction[w_col] = w_val
-        
+            
         # Check if all required features are present
         if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
              is_valid_for_prediction = True
@@ -771,11 +689,11 @@ def index():
              
              # Create a list containing only the current observation, marked as observation
              if max_aqi != "N/A":
-                aqi_predictions = [{
-                   'time': CURRENT_OBSERVATION_TIME,
-                   'aqi': max_aqi,
-                   'is_obs': True # New marker for observation
-                }]
+               aqi_predictions = [{
+                 'time': CURRENT_OBSERVATION_TIME,
+                 'aqi': max_aqi,
+                 'is_obs': True # New marker for observation
+               }]
 
     # 4. Render template
     return render_template('index.html', 
