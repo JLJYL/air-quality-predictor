@@ -1,4 +1,4 @@
-# app.py - FINAL FINAL REVISION (Hardened Timezone and Location Check)
+# app.py - FINAL PRODUCTION CODE (Global Auto-Selection & All Bug Fixes)
 
 # =================================================================
 # Import all necessary libraries 
@@ -32,11 +32,11 @@ HEADERS = {"X-API-Key": API_KEY}
 # BASE V3
 BASE = "https://api.openaq.org/v3"
 
-# Target geographical coordinates 
+# Target geographical coordinates (Default to Kaohsiung if not overridden by the user's setup)
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
-# Initial/Default Location (These will be updated by initialize_location)
+# Initial/Default Location (Hardcoded fallback if NO PM2.5 station is found worldwide)
 DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
 DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
 
@@ -101,53 +101,67 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# V3 API 穩健定位函式 (修正 422 錯誤)
+# V3 API Global Auto-Selection Function
 # =================================================================
-def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
+def get_nearest_location(lat: float, lon: float): 
     """
-    Searches for the closest monitoring station using V3 API with simplified parameters.
-    硬性修正：強制使用 V3 API 要求的參數。
+    Searches for the closest monitoring station in two phases:
+    1. Strict search (25km radius, top 5 results).
+    2. Fallback search (100km radius, up to 100 results) to find any available PM2.5 station.
     """
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
-    # 硬性修正: 確保 radius <= 25000，並只使用 V3 支援的參數
-    params = {
-        "coordinates": f"{lat},{lon}",
-        "radius": 25000,  # 强制限制在 25km
-        "limit": 5,
-        # 移除 order_by 和 sort 參數，因為 V3 API 不允許
-    }
-    
-    try:
-        r = requests.get(V3_LOCATIONS_URL, headers=HEADERS, params=params, timeout=10)
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        
-        if not results:
-            print("🚨 [Nearest] V3: No stations found within the specified radius (25km).")
-            return None, None
-            
-        # V3 回傳的結果預設應該是按照距離排序的
-        # 篩選出第一個提供 PM2.5 數據的站點
-        for nearest_loc in results:
-            # 檢查該站點的 parameters 列表是否包含 PM2.5 (ID: 2 或 name: pm25)
-            has_pm25 = any(p.get("id") == 2 or p.get("name").lower() == "pm25" for p in nearest_loc.get("parameters", []))
-            
-            if has_pm25:
-                loc_id = int(nearest_loc["id"])
-                loc_name = nearest_loc["name"]
-                print(f"✅ [Nearest] V3: Successfully found nearest station: {loc_name} (ID: {loc_id})")
-                return loc_id, loc_name
-        
-        # 如果前 5 個站點都沒有 PM2.5，則回傳 None
-        print("🚨 [Nearest] V3: Found stations, but none of the nearest 5 offer PM2.5 data.")
-        return None, None
+    # --- 搜尋階段設定 ---
+    # (Radius is in meters for V3 API)
+    search_phases = [
+        {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"},
+        {"radius_m": 100000, "limit": 100, "name": "Fallback (100km/100)"},
+    ]
 
-    except Exception as e:
-        status_code = r.status_code if 'r' in locals() else 'N/A'
-        error_detail = r.text if 'r' in locals() else str(e)
-        print(f"❌ [Nearest] V3: Failed to search for the nearest station. Status: {status_code}. Details: {error_detail}")
-        return None, None
+    for phase in search_phases:
+        radius_m = phase["radius_m"]
+        limit = phase["limit"]
+        
+        params = {
+            "coordinates": f"{lat},{lon}",
+            "radius": radius_m, 
+            "limit": limit,
+        }
+        
+        try:
+            r = requests.get(V3_LOCATIONS_URL, headers=HEADERS, params=params, timeout=10)
+            r.raise_for_status()
+            results = r.json().get("results", [])
+            
+            if not results:
+                print(f"🚨 [Nearest] Phase {phase['name']}: No stations found.")
+                continue # Go to the next phase
+
+            # 篩選出第一個提供 PM2.5 數據的站點
+            for nearest_loc in results:
+                # 檢查該站點的 parameters 列表是否包含 PM2.5 (ID: 2 或 name: pm25)
+                has_pm25 = any(p.get("id") == 2 or p.get("name").lower() == "pm25" for p in nearest_loc.get("parameters", []))
+                
+                if has_pm25:
+                    loc_id = int(nearest_loc["id"])
+                    loc_name = nearest_loc["name"]
+                    print(f"✅ [Nearest] Phase {phase['name']}: Successfully found available station: {loc_name} (ID: {loc_id})")
+                    return loc_id, loc_name
+            
+            # 如果在當前 phase 找到了站點但都沒有 PM2.5
+            if results:
+                 print(f"🚨 [Nearest] Phase {phase['name']}: Found {len(results)} stations, but none offer PM2.5 data.")
+                 # Continue to the next phase
+                 
+        except Exception as e:
+            # Added more robust error logging to catch 422 if it somehow returns
+            status_code = r.status_code if 'r' in locals() else 'N/A'
+            error_detail = r.text if 'r' in locals() else str(e)
+            print(f"❌ [Nearest] Phase {phase['name']}: Failed to search. Status: {status_code}. Details: {error_detail}")
+            continue # Go to the next phase
+
+    # 如果所有階段都失敗，則回傳 None
+    return None, None
         
 # -----------------------------------------------------------------
 # Core Data Fetching Logic (All use V3 BASE)
@@ -390,7 +404,7 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# Prediction Function (修正時區錯誤)
+# Prediction Function (Timezone Aware)
 # =================================================================
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
@@ -551,10 +565,10 @@ def initialize_location():
         current_location_id = loc_id
         current_location_name = loc_name
     else:
-        # Fallback to the hardcoded default if API call fails
+        # Fallback to the hardcoded default if all search phases fail (e.g., in a remote area)
         current_location_id = DEFAULT_LOCATION_ID
         current_location_name = DEFAULT_LOCATION_NAME
-        print(f"⚠️ Could not find the nearest station, using default station: {current_location_name} (ID: {current_location_id})")
+        print(f"⚠️ All search phases failed or no valid station found, using hardcoded default station: {current_location_name} (ID: {current_location_id})")
 
 # Dynamically find the nearest location before app instantiation
 initialize_location()
@@ -704,4 +718,6 @@ def index():
                             is_fallback=is_fallback_mode)
 
 if __name__ == '__main__':
+    # When running locally, Flask usually uses port 5000. 
+    # For Render deployment, gunicorn handles the port (10000).
     app.run(debug=True)
