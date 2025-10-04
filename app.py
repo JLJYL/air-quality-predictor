@@ -31,13 +31,13 @@ API_KEY = "fb579916623e8483cd85344b14605c3109eea922202314c44b87a2df3b1fff77"
 HEADERS = {"X-API-Key": API_KEY}
 BASE = "https://api.openaq.org/v3"
 
-# New: Target geographical coordinates (near Qianjin District, Kaohsiung)
+# Target geographical coordinates (near Qianjin District, Kaohsiung)
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
-# Initial Location ID (will be overwritten on startup)
-LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
-LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
+# Initial/Default Location (These will be updated by initialize_location)
+DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
+DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
 
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
 PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
@@ -46,7 +46,7 @@ TOL_MINUTES_PRIMARY = 5
 TOL_MINUTES_FALLBACK = 60
 
 # =================================================================
-# Global Variables
+# Global Variables (Mutable)
 # =================================================================
 TRAINED_MODELS = {} 
 LAST_OBSERVATION = None 
@@ -57,6 +57,10 @@ HOURS_TO_PREDICT = 24
 # Store the latest observation data (for fallback)
 CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
+
+# Dynamic Location Variables (Will be updated on startup)
+current_location_id = DEFAULT_LOCATION_ID
+current_location_name = DEFAULT_LOCATION_NAME
 
 # =================================================================
 # Constants
@@ -100,18 +104,18 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# NEW: Function to get the nearest location
+# NEW: Function to get the nearest location (FIXED API PARAMETERS)
 # =================================================================
 def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
     """
     Searches for the closest monitoring station on OpenAQ based on coordinates.
-    Filters for stations that provide 'pm25' data and sorts by distance.
+    Filters for stations that provide 'pm25' data by checking results.
     """
     params = {
         "coordinates": f"{lat},{lon}",
         "radius": radius_km * 1000, # convert to meters
         "limit": 5,
-        "parameter_id": 2, # Look for stations with PM2.5 data
+        # ⚠️ REMOVED "parameter_id": 2 to fix the 422 Client Error
         "order_by": "distance",
         "sort": "asc"
     }
@@ -125,8 +129,18 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
             print("🚨 [Nearest] No stations found within the specified radius.")
             return None, None
             
-        # Select the nearest result
-        nearest_loc = results[0]
+        # Filter for the nearest station that offers pm25 data
+        valid_stations = [
+            loc for loc in results 
+            if any(p.get("id") == 2 or p.get("name") == "pm25" for p in loc.get("parameters", []))
+        ]
+        
+        if not valid_stations:
+            print("🚨 [Nearest] Found stations, but none offer PM2.5 data. Using the closest one as fallback.")
+            nearest_loc = results[0] # Use the absolute closest as a last resort
+        else:
+            nearest_loc = valid_stations[0] # Use the closest one with PM2.5
+            
         loc_id = int(nearest_loc["id"])
         loc_name = nearest_loc["name"]
         
@@ -134,7 +148,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 50):
         return loc_id, loc_name
 
     except Exception as e:
-        print(f"❌ [Nearest] Failed to search for the nearest station: {e}")
+        print(f"❌ [Nearest] Failed to search for the nearest station: {r.status_code} {r.text if 'r' in locals() else ''} Error: {e}")
         return None, None
         
 # -----------------------------------------------------------------
@@ -479,6 +493,7 @@ def load_models_and_metadata():
         FEATURE_COLUMNS = metadata.get('feature_columns', [])
         
         if 'last_observation_json' in metadata:
+            # We rely on this to provide the initial lagged features
             LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
 
         TRAINED_MODELS = {}
@@ -513,14 +528,23 @@ def load_models_and_metadata():
 # Flask Application Setup and Initialization
 # =================================================================
 
+def initialize_location():
+    """Finds the nearest location and updates the global variables."""
+    global current_location_id, current_location_name, DEFAULT_LOCATION_ID, DEFAULT_LOCATION_NAME
+    
+    loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
+    
+    if loc_id is not None:
+        current_location_id = loc_id
+        current_location_name = loc_name
+    else:
+        # Fallback to the hardcoded default if API call fails
+        current_location_id = DEFAULT_LOCATION_ID
+        current_location_name = DEFAULT_LOCATION_NAME
+        print(f"⚠️ Could not find the nearest station, using default station: {current_location_name} (ID: {current_location_id})")
+
 # Dynamically find the nearest location before app instantiation
-loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
-if loc_id is not None:
-    LOCATION_ID = loc_id
-    LOCATION_NAME = loc_name
-    print(f"🚀 Prediction target station updated to: {LOCATION_NAME} (ID: {LOCATION_ID})")
-else:
-    print(f"⚠️ Could not find the nearest station, using default station: {LOCATION_NAME} (ID: {LOCATION_ID})")
+initialize_location()
 
 
 app = Flask(__name__)
@@ -531,11 +555,11 @@ with app.app_context():
 
 @app.route('/')
 def index():
-    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, LOCATION_ID, LOCATION_NAME
-    station_name = LOCATION_NAME
+    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, current_location_id, current_location_name
+    station_name = current_location_name
     
     # 1. Attempt to fetch the latest observation data in real-time
-    current_observation_raw = fetch_latest_observation_data(LOCATION_ID, POLLUTANT_TARGETS)
+    current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
 
     # Extract the latest observed AQI for fallback
     if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
@@ -561,7 +585,13 @@ def index():
         # Integrate the latest observation into the lagged features
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
         latest_row = current_observation_raw.iloc[0]
-        observation_for_prediction['datetime'] = latest_row['datetime']
+        
+        # Ensure 'datetime' has no timezone for recursive prediction function logic
+        dt_val = latest_row['datetime']
+        if dt_val.tz is not None:
+            dt_val = dt_val.tz_localize(None)
+            
+        observation_for_prediction['datetime'] = dt_val
         
         # Update current values and features (non-lag/non-rolling)
         for col in latest_row.index:
@@ -572,7 +602,7 @@ def index():
         # Check if all required features are present
         if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
              is_valid_for_prediction = True
-             print("✅ [Request] Data prepared, ready for prediction.")
+             # print("✅ [Request] Data prepared, ready for prediction.")
         else:
              print("⚠️ [Request] Missing required feature columns after integration, falling back.")
     else:
@@ -587,6 +617,7 @@ def index():
 
     if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
         try:
+            
             # Final timezone check
             observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
             if observation_for_prediction['datetime'].dt.tz is not None:
@@ -601,6 +632,7 @@ def index():
             )
 
             # Convert UTC time to local time for display
+            future_predictions['datetime'] = future_predictions['datetime'].dt.tz_localize('UTC')
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
             
             # Process NaN values and calculate Max AQI
@@ -640,23 +672,23 @@ def index():
             print(f"❌ [Request] Prediction execution failed ({e}), falling back to latest observed AQI.") 
             
     if is_fallback_mode:
-          # Models not loaded or data invalid, generate a single observation entry for fallback display
-          print("🚨 [Request] Final result using fallback mode.")
-          max_aqi = CURRENT_OBSERVATION_AQI
-          
-          # Create a list containing only the current observation, marked as observation
-          if max_aqi != "N/A":
-              aqi_predictions = [{
-                'time': CURRENT_OBSERVATION_TIME,
-                'aqi': max_aqi,
-                'is_obs': True # New marker for observation
-              }]
+             # Models not loaded or data invalid, generate a single observation entry for fallback display
+             print("🚨 [Request] Final result using fallback mode.")
+             max_aqi = CURRENT_OBSERVATION_AQI
+             
+             # Create a list containing only the current observation, marked as observation
+             if max_aqi != "N/A":
+               aqi_predictions = [{
+                 'time': CURRENT_OBSERVATION_TIME,
+                 'aqi': max_aqi,
+                 'is_obs': True # New marker for observation
+               }]
 
     # 4. Render template
     return render_template('index.html', 
                             max_aqi=max_aqi, 
                             aqi_predictions=aqi_predictions, 
-                            city_name=LOCATION_NAME, # Use the dynamically found location name
+                            city_name=current_location_name, # Use the dynamically found location name
                             current_obs_time=CURRENT_OBSERVATION_TIME,
                             is_fallback=is_fallback_mode)
 
