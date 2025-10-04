@@ -580,6 +580,12 @@ def index():
              CURRENT_OBSERVATION_TIME = "N/A"
     
     
+    # app.py 內，修正 index() 函式中處理時區的部分
+
+@app.route('/')
+def index():
+    # ... (前面的程式碼保持不變) ...
+
     # 2. Prepare data for prediction
     observation_for_prediction = None
     is_valid_for_prediction = False
@@ -589,13 +595,15 @@ def index():
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
         latest_row = current_observation_raw.iloc[0]
         
-        # Ensure 'datetime' has no timezone for recursive prediction function logic
-        # Note: This is necessary because predict_future_multi handles the timezone
+        # 核心修正：使用 tz_convert(None) 安全地移除時區資訊，為遞迴預測做準備。
         dt_val = latest_row['datetime']
         if dt_val.tz is not None:
-            dt_val = dt_val.tz_localize(None)
+            # ⚠️ 修正：安全地移除時區
+            dt_val = dt_val.tz_convert(None)
             
         observation_for_prediction['datetime'] = dt_val
+        
+        # ... (後續的程式碼保持不變) ...
         
         # Update current values and features (non-lag/non-rolling)
         for col in latest_row.index:
