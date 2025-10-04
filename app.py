@@ -14,7 +14,7 @@ import numpy as np
 import xgboost as xgb
 import json
 from datetime import timedelta, timezone
-from flask import Flask, render_template, request # <--- 確保 request 已導入
+from flask import Flask, render_template, request 
 
 # Ignore warnings
 warnings.filterwarnings('ignore')
@@ -37,8 +37,8 @@ TARGET_LAT = 22.6324
 TARGET_LON = 120.2954
 
 # Initial/Default Location (Hardcoded fallback if NO PM2.5 station is found worldwide)
-DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
-DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
+DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin (Used ONLY for model loading fallback)
+DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin" 
 
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
 PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
@@ -60,8 +60,9 @@ CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
 
 # Dynamic Location Variables (Will be updated on startup and on each user request)
-current_location_id = DEFAULT_LOCATION_ID
-current_location_name = DEFAULT_LOCATION_NAME
+# ⚠️ 這裡改為 None，以啟用中立回退機制
+current_location_id = None 
+current_location_name = "System Initializing..."
 
 # =================================================================
 # Constants
@@ -101,23 +102,18 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# V3 API Global Auto-Selection Function
-# 🚨 修正了 Fallback 階段的半徑限制
+# V3 API Global Auto-Selection Function - 已移除 PM2.5 篩選
 # =================================================================
 def get_nearest_location(lat: float, lon: float): 
     """
-    Searches for the closest monitoring station in two phases:
-    1. Strict search (25km radius, top 5 results).
-    2. Fallback search (25km radius, top 100 results) due to OpenAQ API constraints.
+    Searches for the closest monitoring station in two phases.
+    Filters PM2.5 availability only AFTER fetching the actual data (in index route).
     """
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     
     # --- 搜尋階段設定 ---
-    # OpenAQ V3 API 限制 radius 最大為 25000 公尺
     search_phases = [
-        # Phase 1: 嚴格搜尋 25km 內 PM2.5 站點 (Limit 5)
         {"radius_m": 25000, "limit": 5, "name": "Strict (25km/5)"}, 
-        # Phase 2: Fallback 搜尋，仍使用最大半徑 25km，但增加 Limit 到 100
         {"radius_m": 25000, "limit": 100, "name": "Fallback (25km/100)"}, 
     ]
 
@@ -138,30 +134,21 @@ def get_nearest_location(lat: float, lon: float):
             
             if not results:
                 print(f"🚨 [Nearest] Phase {phase['name']}: No stations found.")
-                continue # Go to the next phase
+                continue 
 
-            # 篩選出第一個提供 PM2.5 數據的站點
-            for nearest_loc in results:
-                # 檢查該站點的 parameters 列表是否包含 PM2.5 (ID: 2 或 name: pm25)
-                has_pm25 = any(p.get("id") == 2 or p.get("name").lower() == "pm25" for p in nearest_loc.get("parameters", []))
-                
-                if has_pm25:
-                    loc_id = int(nearest_loc["id"])
-                    loc_name = nearest_loc["name"]
-                    print(f"✅ [Nearest] Phase {phase['name']}: Successfully found available station: {loc_name} (ID: {loc_id})")
-                    return loc_id, loc_name
+            # **【重要修改】**：不再檢查 PM2.5 屬性，直接選中第一個站點
+            nearest_loc = results[0] 
+            loc_id = int(nearest_loc["id"])
+            loc_name = nearest_loc["name"]
             
-            # 如果在當前 phase 找到了站點但都沒有 PM2.5
-            if results:
-                 print(f"🚨 [Nearest] Phase {phase['name']}: Found {len(results)} stations, but none offer PM2.5 data.")
-                 # Continue to the next phase
+            print(f"✅ [Nearest] Phase {phase['name']}: Found the closest station: {loc_name} (ID: {loc_id}).")
+            return loc_id, loc_name
                  
         except Exception as e:
-            # 捕獲並打印錯誤（例如 422 狀態碼，如果限制改變）
             status_code = r.status_code if 'r' in locals() else 'N/A'
             error_detail = r.text if 'r' in locals() else str(e)
             print(f"❌ [Nearest] Phase {phase['name']}: Failed to search. Status: {status_code}. Details: {error_detail}")
-            continue # Go to the next phase
+            continue 
 
     # 如果所有階段都失敗，則回傳 None
     return None, None
@@ -522,8 +509,8 @@ def load_models_and_metadata():
         POLLUTANT_PARAMS = metadata.get('pollutant_params', [])
         FEATURE_COLUMNS = metadata.get('feature_columns', [])
         
+        # ⚠️ 這裡使用 DEFAULT_LOCATION_ID 的歷史數據作為模型的初始輸入
         if 'last_observation_json' in metadata:
-            # We rely on this to provide the initial lagged features
             LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
 
         TRAINED_MODELS = {}
@@ -559,20 +546,25 @@ def load_models_and_metadata():
 # =================================================================
 
 def initialize_location_on_startup():
-    """Finds the nearest location using the default target coordinates (for startup only)."""
-    global current_location_id, current_location_name, DEFAULT_LOCATION_ID, DEFAULT_LOCATION_NAME
+    """
+    Finds the nearest location using the default target coordinates. 
+    If no PM2.5 station is found, current_location_id is set to None.
+    """
+    global current_location_id, current_location_name, DEFAULT_LOCATION_NAME
     
     print(f"🌐 [Startup] Initializing location using default coordinates: {TARGET_LAT}, {TARGET_LON}")
     loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
     
     if loc_id is not None:
+        # 找到站點，但我們還不能確定它有 PM2.5，先選中它
         current_location_id = loc_id
         current_location_name = loc_name
+        print(f"✅ [Startup] Found a potential station: {current_location_name} (ID: {current_location_id})")
     else:
-        # Fallback to the hardcoded default if all search phases fail
-        current_location_id = DEFAULT_LOCATION_ID
-        current_location_name = DEFAULT_LOCATION_NAME
-        print(f"⚠️ [Startup] All search phases failed, using hardcoded default station: {current_location_name} (ID: {current_location_id})")
+        # 找不到任何站點 (25km 半徑內)
+        current_location_id = None
+        current_location_name = "Default (No Station Found Near Target)"
+        print(f"⚠️ [Startup] No station found near default location. Initializing to 'None' station ID.")
 
 # Dynamically find the nearest location for the server's initial run
 initialize_location_on_startup()
@@ -589,90 +581,106 @@ def index():
     global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, current_location_id, current_location_name, TARGET_LAT, TARGET_LON
     
     # === 獲取用戶座標或使用預設座標 ===
-    # 從 URL 參數中獲取用戶的緯度 (lat) 和經度 (lon)
     user_lat = request.args.get('lat', type=float)
     user_lon = request.args.get('lon', type=float)
 
     # 設置當前請求要使用的站點資訊 (預設使用全局變量)
-    current_location_id_to_use = current_location_id
-    current_location_name_to_use = current_location_name
+    station_id = current_location_id
+    station_name = current_location_name
 
-    if user_lat is None or user_lon is None:
-        # 1. 如果 URL 參數中沒有座標 (用戶第一次進入或拒絕定位)
-        target_lat = TARGET_LAT
-        target_lon = TARGET_LON
-        
-        print(f"⚠️ [Location] No user coordinates found. Using current station: {current_location_name_to_use}")
-        
-    else:
-        # 2. 如果成功獲取到用戶的即時座標，則用此座標進行站點搜尋
+    # 1. 處理有用戶座標的情況，嘗試尋找最近站點
+    if user_lat is not None and user_lon is not None:
         target_lat = user_lat
         target_lon = user_lon
         
         print(f"✅ [Location] Using User Coordinates: LAT={target_lat}, LON={target_lon}")
         
-        # 根據用戶的座標，重新尋找最近且有 PM2.5 數據的站點
         loc_id, loc_name = get_nearest_location(target_lat, target_lon)
         
         if loc_id is not None:
             # 找到新的最近站點，更新當前請求使用的站點資訊
-            current_location_id_to_use = loc_id
-            current_location_name_to_use = loc_name
+            station_id = loc_id
+            station_name = loc_name
         else:
-            # 即使有用戶座標，但附近找不到任何 PM2.5 站點，則使用硬編碼的最終回退站點 (前金)
-            current_location_id_to_use = DEFAULT_LOCATION_ID
-            current_location_name_to_use = DEFAULT_LOCATION_NAME
-            print(f"⚠️ [Location] No PM2.5 station found near user, falling back to: {current_location_name_to_use}")
-            
-    # 使用當前請求確認的站點資訊
-    station_id = current_location_id_to_use
-    station_name = current_location_name_to_use
+            # 找不到任何站點 (25km 半徑內)
+            station_id = None
+            # 站名設置為一個中立的標籤，用於 No Data 回退
+            station_name = f"Location near {target_lat:.2f}, {target_lon:.2f}"
+            print(f"⚠️ [Location] No station found near user. Entering 'No Data' mode.")
     
-    # 1. Attempt to fetch the latest observation data in real-time
+    else:
+        # 2. 如果 URL 參數中沒有座標 (使用啟動時的結果)
+        print(f"⚠️ [Location] No user coordinates found. Using current station: {station_name}")
+        
+    # =================================================================
+    # 核心邏輯：站點有效性檢查與數據獲取
+    # =================================================================
+
+    # 3. 如果站點 ID 是 None (找不到任何站點)，則直接進入無法預測模式
+    if station_id is None:
+        max_aqi = "N/A"
+        # 站點名稱已經是中立標籤
+        return render_template('index.html', 
+                                max_aqi=max_aqi, 
+                                aqi_predictions=[], 
+                                city_name=station_name, 
+                                current_obs_time="N/A",
+                                is_fallback=True)
+    
+    # 4. 嘗試獲取最新的觀測數據
     current_observation_raw = fetch_latest_observation_data(station_id, POLLUTANT_TARGETS)
 
-    # Extract the latest observed AQI for fallback
-    if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
-        obs_aqi_val = current_observation_raw['aqi'].iloc[0]
-        obs_time_val = current_observation_raw['datetime'].iloc[0]
+    # **【重要檢查】**：檢查獲取的實際數據中是否包含 PM2.5
+    if current_observation_raw.empty or 'pm25' not in current_observation_raw.columns or pd.isna(current_observation_raw['pm25'].iloc[0]):
+        print(f"🚨 [Data Check] Station {station_name} (ID: {station_id}) was selected but did NOT return valid PM2.5 data. Falling back to 'No Data' mode.")
         
-        CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
+        # 觸發「無數據」回退
+        station_name = f"{station_name} (PM2.5 Unavailable)"
+        max_aqi = "N/A"
+        return render_template('index.html', 
+                                max_aqi=max_aqi, 
+                                aqi_predictions=[], 
+                                city_name=station_name, 
+                                current_obs_time="N/A",
+                                is_fallback=True)
         
-        if pd.notna(obs_time_val):
-            # 確保 time is UTC-aware for display, then convert to local
-            if obs_time_val.tz is None:
-                 obs_time_val = obs_time_val.tz_localize('UTC')
+    # =================================================================
+    # 5. 數據有效：執行預測
+    # =================================================================
+    
+    # Extract the latest observed AQI 
+    obs_aqi_val = current_observation_raw['aqi'].iloc[0] if 'aqi' in current_observation_raw.columns else np.nan
+    obs_time_val = current_observation_raw['datetime'].iloc[0]
+        
+    CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
+        
+    if pd.notna(obs_time_val):
+        if obs_time_val.tz is None:
+             obs_time_val = obs_time_val.tz_localize('UTC')
             
-            CURRENT_OBSERVATION_TIME = obs_time_val.tz_convert(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
-        else:
-             CURRENT_OBSERVATION_TIME = "N/A"
+        CURRENT_OBSERVATION_TIME = obs_time_val.tz_convert(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
+    else:
+        CURRENT_OBSERVATION_TIME = "N/A"
     
-    
-    # 2. Prepare data for prediction
+    # Prepare data for prediction
     observation_for_prediction = None
     is_valid_for_prediction = False
 
     if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-        # Integrate the latest observation into the lagged features
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
         latest_row = current_observation_raw.iloc[0]
         
-        # 核心修正：安全地移除時區，為遞迴預測做準備
         dt_val = latest_row['datetime']
-        
-        # 雙重檢查：確保移除時區時不會觸發 'Already tz-aware' 錯誤
         if pd.to_datetime(dt_val).tz is not None:
             dt_val = pd.to_datetime(dt_val).tz_convert(None) 
             
         observation_for_prediction['datetime'] = dt_val
         
-        # Update current values and features (non-lag/non-rolling)
         for col in latest_row.index:
             if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
                  if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
                       observation_for_prediction[col] = latest_row[col]
             
-        # Check if all required features are present
         if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
              is_valid_for_prediction = True
         else:
@@ -681,16 +689,13 @@ def index():
         print("🚨 [Request] Cannot get latest observation or lagged model data. Prediction is not possible.")
 
 
-    # 3. Perform prediction or fallback
+    # Perform prediction or fallback
     max_aqi = CURRENT_OBSERVATION_AQI
     aqi_predictions = []
-    
     is_fallback_mode = True
 
     if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
         try:
-            
-            # The final time zone handling is done within predict_future_multi
             future_predictions = predict_future_multi(
                 TRAINED_MODELS,
                 observation_for_prediction,
@@ -699,16 +704,12 @@ def index():
                 hours=HOURS_TO_PREDICT
             )
 
-            # Convert UTC time to local time for display
-            # future_predictions['datetime'] is UTC-aware from predict_future_multi
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
             
-            # Process NaN values and calculate Max AQI
             predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
             max_aqi_val = predictions_df['aqi_pred'].max()
             max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
             
-            # Replace NaN with "N/A" and convert valid numbers to integers
             predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
             predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
                  lambda x: int(x) if x != "N/A" else "N/A"
@@ -726,33 +727,29 @@ def index():
                  is_fallback_mode = False
                  print("✅ [Request] Prediction successful!")
             else:
-                 # Prediction list is empty, fallback to current observed AQI
                  max_aqi = CURRENT_OBSERVATION_AQI
                  is_fallback_mode = True
                  print("⚠️ [Request] Prediction list is empty, falling back to latest observed AQI.")
 
 
         except Exception as e:
-            # Prediction failed, fallback
             max_aqi = CURRENT_OBSERVATION_AQI
             aqi_predictions = []
             is_fallback_mode = True
             print(f"❌ [Request] Prediction execution failed ({e}), falling back to latest observed AQI.") 
             
     if is_fallback_mode:
-             # Models not loaded or data invalid, generate a single observation entry for fallback display
              print("🚨 [Request] Final result using fallback mode.")
              max_aqi = CURRENT_OBSERVATION_AQI
              
-             # Create a list containing only the current observation, marked as observation
              if max_aqi != "N/A":
                aqi_predictions = [{
                  'time': CURRENT_OBSERVATION_TIME,
                  'aqi': max_aqi,
-                 'is_obs': True # New marker for observation
+                 'is_obs': True 
                }]
 
-    # 4. Render template
+    # 6. Render template
     return render_template('index.html', 
                             max_aqi=max_aqi, 
                             aqi_predictions=aqi_predictions, 
@@ -761,5 +758,4 @@ def index():
                             is_fallback=is_fallback_mode)
 
 if __name__ == '__main__':
-    # When running locally, Flask usually uses port 5000. 
     app.run(debug=True)
