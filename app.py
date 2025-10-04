@@ -2,6 +2,7 @@
 
 # =================================================================
 # Import all necessary libraries 
+# 🚨 確保這裡有導入 request，用於獲取用戶座標
 # =================================================================
 import requests
 import pandas as pd
@@ -14,7 +15,7 @@ import numpy as np
 import xgboost as xgb
 import json
 from datetime import timedelta, timezone
-from flask import Flask, render_template
+from flask import Flask, render_template, request # <--- 已添加 request 導入
 
 # Ignore warnings
 warnings.filterwarnings('ignore')
@@ -32,7 +33,7 @@ HEADERS = {"X-API-Key": API_KEY}
 # BASE V3
 BASE = "https://api.openaq.org/v3"
 
-# Target geographical coordinates (Default to Kaohsiung if not overridden by the user's setup)
+# Target geographical coordinates (Default to Kaohsiung if no user coordinates are provided)
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
@@ -59,7 +60,7 @@ HOURS_TO_PREDICT = 24
 CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
 
-# Dynamic Location Variables (Will be updated on startup)
+# Dynamic Location Variables (Will be updated on startup and on each user request)
 current_location_id = DEFAULT_LOCATION_ID
 current_location_name = DEFAULT_LOCATION_NAME
 
@@ -482,8 +483,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         current_prediction_row['aqi_pred'] = predicted_aqi
         new_pollutant_values['aqi'] = predicted_aqi
 
-        predictions.append(current_prediction_row)
-
         # 5. Update lag features for the next hour's prediction (recursive)
         for param in pollutant_params + ['aqi']:
             for i in range(len(LAG_HOURS) - 1, 0, -1):
@@ -497,6 +496,8 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
             if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                 current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+
+        predictions.append(current_prediction_row)
 
     return pd.DataFrame(predictions)
 
@@ -555,23 +556,24 @@ def load_models_and_metadata():
 # Flask Application Setup and Initialization
 # =================================================================
 
-def initialize_location():
-    """Finds the nearest location and updates the global variables."""
+def initialize_location_on_startup():
+    """Finds the nearest location using the default target coordinates (for startup only)."""
     global current_location_id, current_location_name, DEFAULT_LOCATION_ID, DEFAULT_LOCATION_NAME
     
+    print(f"🌐 [Startup] Initializing location using default coordinates: {TARGET_LAT}, {TARGET_LON}")
     loc_id, loc_name = get_nearest_location(TARGET_LAT, TARGET_LON)
     
     if loc_id is not None:
         current_location_id = loc_id
         current_location_name = loc_name
     else:
-        # Fallback to the hardcoded default if all search phases fail (e.g., in a remote area)
+        # Fallback to the hardcoded default if all search phases fail
         current_location_id = DEFAULT_LOCATION_ID
         current_location_name = DEFAULT_LOCATION_NAME
-        print(f"⚠️ All search phases failed or no valid station found, using hardcoded default station: {current_location_name} (ID: {current_location_id})")
+        print(f"⚠️ [Startup] All search phases failed, using hardcoded default station: {current_location_name} (ID: {current_location_id})")
 
-# Dynamically find the nearest location before app instantiation
-initialize_location()
+# Dynamically find the nearest location for the server's initial run
+initialize_location_on_startup()
 
 
 app = Flask(__name__)
@@ -582,7 +584,47 @@ with app.app_context():
 
 @app.route('/')
 def index():
-    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, current_location_id, current_location_name
+    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME, current_location_id, current_location_name, TARGET_LAT, TARGET_LON
+    
+    # === 獲取用戶座標或使用預設座標 ===
+    # 從 URL 參數中獲取用戶的緯度 (lat) 和經度 (lon)
+    user_lat = request.args.get('lat', type=float)
+    user_lon = request.args.get('lon', type=float)
+
+    if user_lat is None or user_lon is None:
+        # 1. 如果 URL 參數中沒有座標 (用戶第一次進入或拒絕定位)
+        target_lat = TARGET_LAT
+        target_lon = TARGET_LON
+        # ⚠️ 此時直接使用當前 global 的 current_location_id，它應當是 startup 階段找到的最近站點
+        # 避免在每次拒絕定位時都重新搜尋
+        
+        print(f"⚠️ [Location] No user coordinates found. Using current station: {current_location_name}")
+        
+    else:
+        # 2. 如果成功獲取到用戶的即時座標，則用此座標進行站點搜尋
+        target_lat = user_lat
+        target_lon = user_lon
+        
+        print(f"✅ [Location] Using User Coordinates: LAT={target_lat}, LON={target_lon}")
+        
+        # 根據用戶的座標，重新尋找最近且有 PM2.5 數據的站點
+        loc_id, loc_name = get_nearest_location(target_lat, target_lon)
+        
+        if loc_id is not None:
+            # 找到新的最近站點，更新 global 變數
+            current_location_id = loc_id
+            current_location_name = loc_name
+        else:
+            # 即使有用戶座標，但附近找不到任何 PM2.5 站點，則使用硬編碼的最終回退站點 (前金)
+            # 這裡不更新 global current_location_id 以避免汙染全局狀態，但仍然使用回退值
+            current_location_id_to_use = DEFAULT_LOCATION_ID
+            current_location_name_to_use = DEFAULT_LOCATION_NAME
+            print(f"⚠️ [Location] No PM2.5 station found near user, falling back to: {current_location_name_to_use}")
+            
+            # 使用回退值進行當前請求的數據獲取
+            current_location_id = current_location_id_to_use 
+            current_location_name = current_location_name_to_use
+            
     station_name = current_location_name
     
     # 1. Attempt to fetch the latest observation data in real-time
