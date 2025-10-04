@@ -76,70 +76,12 @@
             {% endif %}
         </div>
         
-    </div>
+    </div> 
     
     <script>
-        // =================================================================
-        // 🚀 用戶定位請求邏輯 (新增部分)
-        // =================================================================
-        function getLocation() {
-            // 檢查 URL 中是否已經有座標。如果有，表示已經執行過定位，無需再次請求。
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.has('lat') && urlParams.has('lon')) {
-                // 如果已經有座標，則不執行定位邏輯，直接進入繪圖和顏色更新。
-                console.log("Coordinates already in URL, skipping re-request.");
-                updateAqiColors();
-                createAqiChart();
-                return;
-            }
-
-            if (navigator.geolocation) {
-                // 請求定位權限
-                navigator.geolocation.getCurrentPosition(showPosition, showError);
-            } else {
-                console.log("Geolocation is not supported by this browser. Using default coordinates.");
-                // 如果瀏覽器不支持，直接導向回根目錄，讓伺服器使用預設座標
-                window.location.href = "/";
-            }
-        }
-
-        function showPosition(position) {
-            const lat = position.coords.latitude;
-            const lon = position.coords.longitude;
-            
-            // 成功獲取座標後，重新導向到帶有新座標的 URL
-            console.log(`Successfully acquired location: LAT=${lat}, LON=${lon}. Reloading page...`);
-            window.location.href = `/?lat=${lat}&lon=${lon}`;
-        }
-
-        function showError(error) {
-            let message = "定位失敗，使用預設位置。";
-            switch(error.code) {
-                case error.PERMISSION_DENIED:
-                    message = "用戶拒絕定位請求，使用預設位置。";
-                    break;
-                case error.POSITION_UNAVAILABLE:
-                    message = "位置資訊不可用，使用預設位置。";
-                    break;
-                case error.TIMEOUT:
-                    message = "請求用戶位置超時，使用預設位置。";
-                    break;
-                case error.UNKNOWN_ERROR:
-                    message = "發生未知錯誤，使用預設位置。";
-                    break;
-            }
-            console.log(message);
-            // 無論失敗或拒絕，都導向回根目錄，讓伺服器使用預設座標
-            window.location.href = "/";
-        }
-        // =================================================================
-        // -----------------------------------------------------------------
-
-
         // --- 1. Data Variable Transfer and Parsing ---
         let predictions = [];
         try {
-            // 注意：這裡使用 | tojson | safe 是 Jinja2 語法，確保數據能被 JSON.parse 讀取
             const aqi_predictions_json = '{{ aqi_predictions | tojson | safe }}';
             if (aqi_predictions_json && aqi_predictions_json !== 'null' && aqi_predictions_json !== 'None') {
                 predictions = JSON.parse(aqi_predictions_json);
@@ -172,7 +114,7 @@
                 else colorClass = 'aqi-300';
             }
             // Remove old background classes and add the new one
-            aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('aqi-')).join(' ');
+            aqiStatusElement.className = aqiStatusElement.className.split(' ').filter(c => !c.startsWith('bg-')).join(' ');
             aqiStatusElement.classList.add(colorClass);
         }
 
@@ -243,22 +185,7 @@
                             max: 200, 
                             ticks: {
                                 callback: function(value) {
-                                    // Hide ticks above 200 for better chart focus
                                     return (value <= 200) ? value : null; 
-                                },
-                                stepSize: 50, // Added step size for cleaner look
-                            },
-                             // Add AQI zone lines
-                            grid: {
-                                color: function(context) {
-                                    if (context.tick.value === 50) return '#10B981'; // Green
-                                    if (context.tick.value === 100) return '#EAB308'; // Yellow
-                                    if (context.tick.value === 150) return '#F97316'; // Orange
-                                    if (context.tick.value === 200) return '#DC2626'; // Red
-                                    return 'rgba(0, 0, 0, 0.1)'; // Default grid line
-                                },
-                                lineWidth: function(context) {
-                                    return (context.tick.value % 50 === 0 && context.tick.value !== 0) ? 1.5 : 0.5;
                                 }
                             }
                         },
@@ -286,21 +213,16 @@
                                     return 'Forecast';
                                 }
                             }
-                        },
-                        zoom: {
-                            pan: { enabled: true, mode: 'x' },
-                            zoom: {
-                                drag: { enabled: true },
-                                mode: 'x',
-                            }
                         }
                     }
                 }
             });
         }
 
-        // 頁面加載時，先執行定位邏輯
-        window.onload = getLocation;
+        window.onload = function() {
+            updateAqiColors();
+            createAqiChart();
+        };
     </script>
 </body>
 </html>
