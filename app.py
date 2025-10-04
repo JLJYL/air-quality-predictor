@@ -1,4 +1,4 @@
-# app.py - Final Revision (Fixed 422 API Error and Timezone Error)
+# app.py - Final Final Revision (Fixed Timezone Error in Data Fetching)
 
 # =================================================================
 # Import all necessary libraries 
@@ -32,7 +32,7 @@ HEADERS = {"X-API-Key": API_KEY}
 # BASE V3
 BASE = "https://api.openaq.org/v3"
 
-# Target geographical coordinates (Still using Kaohsiung for consistency with the log)
+# Target geographical coordinates 
 TARGET_LAT = 22.6324 
 TARGET_LON = 120.2954
 
@@ -101,9 +101,9 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# 核心修正: V3 API 穩健定位函式 (修正 422 錯誤)
+# V3 API 穩健定位函式 (修正 422 錯誤)
 # =================================================================
-def get_nearest_location(lat: float, lon: float, radius_km: int = 25): # ⚠️ 修正: radius_km 最大值為 25
+def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
     """
     Searches for the closest monitoring station using V3 API with simplified parameters.
     """
@@ -129,7 +129,6 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25): # ⚠️ 
         # 篩選出第一個提供 PM2.5 數據的站點
         for nearest_loc in results:
             # 檢查該站點的 parameters 列表是否包含 PM2.5 (ID: 2 或 name: pm25)
-            # 注意：V3 API 回傳的 parameter.name 是大寫，故使用 .lower()
             has_pm25 = any(p.get("id") == 2 or p.get("name").lower() == "pm25" for p in nearest_loc.get("parameters", []))
             
             if has_pm25:
@@ -144,7 +143,6 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25): # ⚠️ 
 
     except Exception as e:
         status_code = r.status_code if 'r' in locals() else 'N/A'
-        # 輸出詳細的 422 錯誤訊息
         error_detail = r.text if 'r' in locals() else str(e)
         print(f"❌ [Nearest] V3: Failed to search for the nearest station. Status: {status_code}. Details: {error_detail}")
         return None, None
@@ -237,8 +235,10 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
 
-# ... (pick_batch_near, fetch_latest_observation_data, calculate_aqi_sub_index, calculate_aqi, load_models_and_metadata, initialize_location, index remains the same) ...
 
+# =================================================================
+# Helper Functions: AQI Calculation and Data Wrangling
+# =================================================================
 
 def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> pd.DataFrame:
     """Selects the batch of data closest to t_ref and within tol_minutes."""
@@ -268,7 +268,10 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
 
 
 def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.DataFrame:
-    """Fetches the latest observation data from OpenAQ and converts it to a single-row wide format."""
+    """
+    Fetches the latest observation data from OpenAQ and converts it to a single-row wide format.
+    Includes final timezone logic to ensure 'datetime' is consistently UTC-aware.
+    """
     meta = get_location_meta(location_id)
     if not meta or pd.isna(meta["last_utc"]):
         return pd.DataFrame()
@@ -327,10 +330,15 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
             lambda row: calculate_aqi(row, target_params, is_pred=False), axis=1
         )
         
+    # 核心修正：確保 'datetime' 總是 UTC-aware
     if not observation.empty:
         observation['datetime'] = pd.to_datetime(observation['datetime'])
         if observation['datetime'].dt.tz is None:
+             # 如果沒有時區，本地化為 UTC
              observation['datetime'] = observation['datetime'].dt.tz_localize('UTC')
+        else:
+             # 如果已經有時區，轉換到 UTC (確保一致性)
+             observation['datetime'] = observation['datetime'].dt.tz_convert('UTC')
 
     return observation
 
@@ -380,19 +388,19 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
 
 # =================================================================
-# 核心修正: 預測函式 (修正時區錯誤)
+# Prediction Function (修正時區錯誤)
 # =================================================================
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24):
     """Predicts multiple target pollutants for N future hours (recursive prediction) and calculates AQI."""
     predictions = []
 
-    # 核心修正：避免 'Already tz-aware' 錯誤
+    # 確保數據是 tz-aware (UTC)
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
     if last_data['datetime'].dt.tz is None:
         # 如果沒有時區，賦予 UTC
         last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
     else:
-        # 如果已經有時區，轉換為 UTC
+        # 如果已經有時區，轉換為 UTC (避免 tz_localize 錯誤)
         last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
@@ -478,14 +486,14 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
 
 # =================================================================
-# Model Loading Logic (Remains the same)
+# Model Loading Logic
 # =================================================================
 
 def load_models_and_metadata():
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
 
-    if not os.path.exists(META_PATH):
-        print("🚨 [Load] Model metadata file (model_meta.json) not found. Cannot load models.")
+    if not os.path.exists(MODELS_DIR) or not os.path.exists(META_PATH):
+        print("🚨 [Load] Model metadata file or directory not found. Cannot load models.")
         return
 
     try:
@@ -528,7 +536,7 @@ def load_models_and_metadata():
         POLLUTANT_PARAMS = []
 
 # =================================================================
-# Flask Application Setup and Initialization (Remains the same)
+# Flask Application Setup and Initialization
 # =================================================================
 
 def initialize_location():
@@ -572,6 +580,7 @@ def index():
         CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
         
         if pd.notna(obs_time_val):
+            # 確保 time is tz-aware for display, then convert to local
             if obs_time_val.tz is None:
                  obs_time_val = obs_time_val.tz_localize('UTC')
             
@@ -580,12 +589,6 @@ def index():
              CURRENT_OBSERVATION_TIME = "N/A"
     
     
-    # app.py 內，修正 index() 函式中處理時區的部分
-
-@app.route('/')
-def index():
-    # ... (前面的程式碼保持不變) ...
-
     # 2. Prepare data for prediction
     observation_for_prediction = None
     is_valid_for_prediction = False
@@ -595,15 +598,13 @@ def index():
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy() 
         latest_row = current_observation_raw.iloc[0]
         
-        # 核心修正：使用 tz_convert(None) 安全地移除時區資訊，為遞迴預測做準備。
+        # 核心修正：安全地移除時區，為遞迴預測做準備
         dt_val = latest_row['datetime']
         if dt_val.tz is not None:
-            # ⚠️ 修正：安全地移除時區
-            dt_val = dt_val.tz_convert(None)
+            # 確保移除時區時不會觸發 'Already tz-aware' 錯誤
+            dt_val = dt_val.tz_convert(None) 
             
         observation_for_prediction['datetime'] = dt_val
-        
-        # ... (後續的程式碼保持不變) ...
         
         # Update current values and features (non-lag/non-rolling)
         for col in latest_row.index:
@@ -639,7 +640,7 @@ def index():
             )
 
             # Convert UTC time to local time for display
-            future_predictions['datetime'] = future_predictions['datetime'].dt.tz_localize('UTC')
+            # Note: future_predictions['datetime'] is UTC-aware because of predict_future_multi
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
             
             # Process NaN values and calculate Max AQI
