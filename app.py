@@ -114,8 +114,8 @@ def calculate_aqi(row):
             if pd.notna(aqi):
                 aqis.append(aqi)
     
-    if 'aqi_pred' in row and pd.notna(row['aqi_pred']):
-        aqis.append(row['aqi_pred'])
+    # 注意: 這裡計算的是觀測或預測後的 'aqi' 欄位，不應該讀取 'aqi_pred'
+    # 'aqi_pred' 應只在 predict_future_multi 中用於最終輸出。
         
     if not aqis:
         return np.nan
@@ -125,7 +125,7 @@ def calculate_aqi(row):
 
 def get_aqi_category(aqi):
     """根據 AQI 值返回類別和顏色"""
-    if pd.isna(aqi): return "N/A", "gray"
+    if pd.isna(aqi) or aqi == "N/A": return "N/A", "gray"
     aqi = int(aqi)
     
     if 0 <= aqi <= 50:
@@ -195,7 +195,8 @@ def fetch_latest_observation(location_id):
         response.raise_for_status()
         data = response.json()
         
-        if not data.get('results'):
+        # 處理沒有結果或結果中沒有測量的空數據
+        if not data.get('results') or not data['results'][0].get('measurements'):
             return pd.DataFrame()
 
         # 扁平化結果
@@ -207,9 +208,10 @@ def fetch_latest_observation(location_id):
         if df.empty:
             return pd.DataFrame()
             
-        # 轉換日期時間並設定為本地時區
+        # 轉換日期時間。API 返回的時間是 UTC，但沒有時區標記，我們假設它是一個 'Z' 結尾的 UTC 時間
         df['datetime'] = pd.to_datetime(df['datetime'])
-        df['datetime'] = df['datetime'].dt.tz_convert(LOCAL_TZ).dt.tz_localize(None) # 移除時區以便與訓練數據匹配
+        # 將 UTC 時間轉換為本地時區，然後移除時區資訊 (Naive Local Time)
+        df['datetime'] = df['datetime'].dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
         
         # 轉換為寬格式
         pivot_df = df.pivot_table(index='datetime', columns='parameter_id', values='value').reset_index()
@@ -220,7 +222,7 @@ def fetch_latest_observation(location_id):
                 pivot_df[param] = np.nan
         
         # 僅保留最新一筆數據
-        latest_row = pivot_df.sort_values(by='datetime', ascending=False).iloc[:1]
+        latest_row = pivot_df.sort_values(by='datetime', ascending=False).iloc[:1].copy()
         
         # 計算 AQI
         latest_row['aqi'] = latest_row.apply(
@@ -245,13 +247,18 @@ def fetch_latest_observation(location_id):
 def fetch_weather_forecast(lat, lon, start_datetime):
     """
     從 Open-Meteo 獲取未來 24 小時的天氣預報 (從指定時間開始)。
+    start_datetime 預期是從 OpenAQ 來的 timezone-naive Timestamp。
     """
+    # 確保 start_datetime 是有效的 Timestamp 物件
+    if start_datetime is None or pd.isna(start_datetime):
+        print("⚠️ [OpenMeteo] 無效的開始時間戳記，無法獲取天氣預報。")
+        return pd.DataFrame()
+        
     try:
         # Open-Meteo API 參數
         params = {
             "latitude": lat,
             "longitude": lon,
-            "current": ["temperature_2m", "relative_humidity_2m", "surface_pressure"],
             "hourly": ["temperature_2m", "relative_humidity_2m", "surface_pressure"],
             "timezone": "auto", # 讓 Open-Meteo 處理時區
             "forecast_hours": 48 # 獲取 48 小時預報
@@ -266,7 +273,7 @@ def fetch_weather_forecast(lat, lon, start_datetime):
         hourly = response.Hourly()
         
         hourly_data = {
-            "datetime": pd.to_datetime(hourly.Time(), unit="s"),
+            "datetime": pd.to_datetime(hourly.Time(), unit="s", utc=True), # 確保它是 UTC
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(),
             "pressure": hourly.Variables(2).ValuesAsNumpy()
@@ -274,14 +281,16 @@ def fetch_weather_forecast(lat, lon, start_datetime):
         
         weather_df = pd.DataFrame(hourly_data)
         
-        # 將時間轉換為本地時區 (與 OpenAQ 數據的時間格式匹配，即不帶時區)
-        weather_df['datetime'] = weather_df['datetime'].dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
+        # 1. 將 UTC 時間轉換為本地時區 (帶時區資訊)
+        weather_df['datetime'] = weather_df['datetime'].dt.tz_convert(LOCAL_TZ)
         
-        # 過濾出從開始時間之後的數據
-        # 為了預測 t+1 到 t+24，我們只需要 t+1 及之後的數據
-        start_dt_no_tz = pd.to_datetime(start_datetime).tz_localize(None)
-        weather_df = weather_df[weather_df['datetime'] > start_dt_no_tz]
+        # 2. 移除時區資訊，變成 naive (匹配 OpenAQ 數據和模型訓練)
+        weather_df['datetime'] = weather_df['datetime'].dt.tz_localize(None)
         
+        # 3. 過濾出從開始時間之後的數據
+        # start_datetime 已經是 naive Timestamp
+        weather_df = weather_df[weather_df['datetime'] > start_datetime]
+            
         # 僅保留未來 24 小時的預報
         weather_df = weather_df.sort_values(by='datetime').head(24).reset_index(drop=True)
         
@@ -290,7 +299,7 @@ def fetch_weather_forecast(lat, lon, start_datetime):
         return weather_df
         
     except Exception as e:
-        print(f"❌ [OpenMeteo] Error fetching weather forecast: {e}")
+        print(f"❌ [OpenMeteo] 取得天氣預報失敗: {e}")
         return pd.DataFrame()
 
 
@@ -302,38 +311,40 @@ def load_models():
     """載入所有已儲存的 XGBoost 模型和模型元數據"""
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, INITIAL_AQI_INFO
     
-    if not os.path.exists(MODELS_DIR) or not os.path.exists(META_PATH):
-        print("🚨 [Model] 找不到 models 資料夾或 model_meta.json。請先執行 train_and_save.py。")
-        return False
-
-    with open(META_PATH, 'r') as f:
-        meta_data = json.load(f)
-        FEATURE_COLUMNS = meta_data.get('feature_columns', [])
-        
-        # 載入 LAST_OBSERVATION
-        last_obs_json = meta_data.get('last_observation')
-        if last_obs_json:
-            last_obs_df = pd.DataFrame([last_obs_json])
-            # 確保 'datetime' 欄位被正確轉換
-            last_obs_df['datetime'] = pd.to_datetime(last_obs_df['datetime']).dt.tz_localize(None)
-            LAST_OBSERVATION = last_obs_df
-            print("✅ [Model] LAST_OBSERVATION 載入成功。")
-            
-        INITIAL_AQI_INFO = meta_data.get('initial_aqi_info', {})
-            
-    # 載入每個 pollutant 的模型
-    for param in POLLUTANT_TARGETS:
-        model_path = os.path.join(MODELS_DIR, f'{param}_model.json')
-        if os.path.exists(model_path):
-            xgb_model = xgb.XGBRegressor()
-            xgb_model.load_model(model_path)
-            TRAINED_MODELS[param] = xgb_model
-            print(f"✅ [Model] {param} 模型載入成功。")
-        else:
-            print(f"⚠️ [Model] 找不到 {param} 模型 ({model_path})。")
+    # 即使模型檔案不存在，也嘗試載入元數據 (Feature Columns/LAST_OBSERVATION)
+    if os.path.exists(META_PATH):
+        try:
+            with open(META_PATH, 'r') as f:
+                meta_data = json.load(f)
+                FEATURE_COLUMNS = meta_data.get('feature_columns', [])
+                
+                # 載入 LAST_OBSERVATION
+                last_obs_json = meta_data.get('last_observation')
+                if last_obs_json:
+                    last_obs_df = pd.DataFrame([last_obs_json])
+                    # 確保 'datetime' 欄位被正確轉換
+                    last_obs_df['datetime'] = pd.to_datetime(last_obs_df['datetime']).dt.tz_localize(None)
+                    LAST_OBSERVATION = last_obs_df
+                    print("✅ [Model] LAST_OBSERVATION 載入成功。")
+                    
+                INITIAL_AQI_INFO = meta_data.get('initial_aqi_info', {})
+                
+            # 載入每個 pollutant 的模型
+            for param in POLLUTANT_TARGETS:
+                model_path = os.path.join(MODELS_DIR, f'{param}_model.json')
+                if os.path.exists(model_path):
+                    xgb_model = xgb.XGBRegressor()
+                    xgb_model.load_model(model_path)
+                    TRAINED_MODELS[param] = xgb_model
+                    print(f"✅ [Model] {param} 模型載入成功。")
+                else:
+                    print(f"⚠️ [Model] 找不到 {param} 模型 ({model_path})。")
+                    
+        except Exception as e:
+            print(f"🚨 [Model] 載入元數據或模型時發生錯誤: {e}")
             
     if not TRAINED_MODELS:
-        print("🚨 [Model] 未載入任何模型。")
+        print("🚨 [Model] 未載入任何模型。預測功能將無法運作。")
         return False
     
     print(f"✅ [Model] 所有模型和元數據載入完成。總共 {len(TRAINED_MODELS)} 個模型。")
@@ -429,19 +440,6 @@ def predict_future_multi(df, models, feature_cols):
             break
 
         # 2. 準備當前時間點 (t) 的特徵數據
-        #    a. 創建 t-1 的特徵（滯後特徵）
-        #       這裡我們需要使用 t-1 時刻 (index t-1) 的觀測或預測值來填充 t 時刻的滯後特徵
-        
-        #    b. 創建 t-2, t-3... 的特徵（滾動特徵）
-        #       這裡我們使用 t-24 到 t-1 時刻的觀測或預測值來計算 t 時刻的滾動特徵
-        
-        # 由於訓練時已經將所有滯後和滾動特徵都計算好了，這裡只需要從前一行/前 N 行複製過來
-        # *********** 關鍵步驟：重新計算特徵 ***********
-        
-        # 為了避免在預測時重新實現滾動和滯後邏輯，我們使用一個更簡單的方法：
-        #   - 使用 t-1 的值填充 t 時刻的 1-hour lag
-        #   - 忽略其他 lag 和 rolling，依賴模型從 t=0 的舊 lag 中學到的趨勢。
-        
         # 複製 t-1 的預測/觀測值到 t 時刻的滯後特徵
         prev_idx = current_idx - 1
         
@@ -450,15 +448,15 @@ def predict_future_multi(df, models, feature_cols):
             lag_1h_col = f'{param}_lag_1h'
             value_col = f'{param}_value'
             if lag_1h_col in df.columns and value_col in df.columns:
+                 # 使用 .loc 進行精確賦值
                  df.loc[current_idx, lag_1h_col] = df.loc[prev_idx, value_col]
                  
         # 填充 t 時刻的 aqi lag 1h (使用 t-1 時刻的 aqi)
         if 'aqi_lag_1h' in df.columns and 'aqi' in df.columns:
              df.loc[current_idx, 'aqi_lag_1h'] = df.loc[prev_idx, 'aqi']
 
-        # 確保天氣特徵已經存在 (t+1 開始從 weather_forecast_df 載入)
         # 確保時間特徵已經存在
-        df.loc[current_idx, ['hour', 'dayofweek', 'month']] = df.loc[current_idx].pipe(create_datetime_features).loc[current_idx, ['hour', 'dayofweek', 'month']]
+        # 由於 get_forecast_input_template 已經在 t=0 到 t=24 都生成了時間特徵，這裡不需要重新計算
         
         # 獲取要傳入模型的特徵
         X_test = df.loc[current_idx, feature_cols].to_frame().T
@@ -467,7 +465,10 @@ def predict_future_multi(df, models, feature_cols):
         current_predictions = {}
         for param, model in models.items():
             # 執行預測
-            pred_value = model.predict(X_test)[0]
+            # 確保輸入 X_test 不含 NaN (XGBoost 不支援 NaN)
+            X_test_filled = X_test.fillna(0) # ⚠️ 簡化處理: 僅用 0 填充缺失值，這可能影響準確性，但避免崩潰
+            
+            pred_value = model.predict(X_test_filled)[0]
             current_predictions[param] = max(0, pred_value) # 確保濃度不為負
             
             # 將預測值存回 DataFrame
@@ -500,6 +501,9 @@ if not TRAINED_MODELS:
         fetch_location_list()
     else:
         print("🚨 [App] 無法啟動應用程式，模型載入失敗。")
+        # 即使模型載入失敗，仍嘗試載入測站列表以提供基本介面
+        fetch_location_list()
+
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -540,105 +544,87 @@ def index():
     CURRENT_OBSERVATION_TIME = "N/A"
     CURRENT_OBSERVATION_CATEGORY = "N/A"
     CURRENT_OBSERVATION_COLOR = "bg-gray-400"
+    CURRENT_OBSERVATION_DT = None # 用於儲存 Timestamp 物件
 
     if not current_observation_raw.empty:
         latest_row = current_observation_raw.iloc[0]
         
-        # 更新當前 AQI
+        # --- Update AQI ---
         aqi_val = latest_row['aqi']
         CURRENT_OBSERVATION_AQI = int(aqi_val) if pd.notna(aqi_val) else "N/A"
         
-        # 更新時間
+        # --- Update Time (和儲存 Timestamp 物件) ---
         dt_val = latest_row['datetime']
-        CURRENT_OBSERVATION_TIME = dt_val.strftime('%Y-%m-%d %H:%M') if pd.notna(dt_val) else "N/A"
+        if pd.notna(dt_val):
+            CURRENT_OBSERVATION_DT = dt_val 
+            CURRENT_OBSERVATION_TIME = CURRENT_OBSERVATION_DT.strftime('%Y-%m-%d %H:%M')
 
-        # 更新類別和顏色
+        # --- Update Category and Color ---
         if CURRENT_OBSERVATION_AQI != "N/A":
              CURRENT_OBSERVATION_CATEGORY, CURRENT_OBSERVATION_COLOR = get_aqi_category(CURRENT_OBSERVATION_AQI)
-        
-        # 將最新的天氣觀測加入到 current_observation_raw (如果 OpenMeteo 的當前觀測能獲取)
-        # 這裡由於 V3 API 無法取得歷史天氣，我們暫時跳過這個步驟，
-        # 讓 `observation_for_prediction` 在步驟 5 中使用 LAST_OBSERVATION 中的舊天氣特徵作為起始狀態。
         
         print(f"✅ [Observation] Latest AQI: {CURRENT_OBSERVATION_AQI} at {CURRENT_OBSERVATION_TIME}")
 
 
-    # ========== 3️⃣ 獲取未來天氣預報 ==========
+    # ========== 3️⃣ 獲取未來天氣預報 (使用 Timestamp 物件) ==========
     weather_forecast_df = pd.DataFrame()
-    if CURRENT_OBSERVATION_TIME != "N/A":
+    if CURRENT_OBSERVATION_DT is not None: 
         # 從當前觀測時間開始，獲取未來 24 小時的天氣預報 (用於 t+1 到 t+24)
         weather_forecast_df = fetch_weather_forecast(
             TARGET_LAT, 
             TARGET_LON, 
-            pd.to_datetime(CURRENT_OBSERVATION_TIME)
+            CURRENT_OBSERVATION_DT # 直接傳遞 Timestamp 物件
         )
     
     
     # ========== 4️⃣ 檢查模型和數據完整性 ==========
     aqi_predictions = []
     
-    if not TRAINED_MODELS or not LAST_OBSERVATION.shape[0] > 0 or not weather_forecast_df.shape[0] == 24:
-        print("🚨 [Predict] 模型/LAST_OBSERVATION/天氣預報 不完整，跳過預測。")
+    # 模型必須存在、LAST_OBSERVATION 必須載入、天氣預報必須有 24 筆數據
+    is_valid_for_prediction = bool(TRAINED_MODELS) and \
+                             LAST_OBSERVATION is not None and \
+                             not LAST_OBSERVATION.empty and \
+                             weather_forecast_df.shape[0] == 24
     
-    
-    # ========== 5️⃣ 建立預測或回退顯示 (修正核心邏輯) ==========
-    observation_for_prediction = None
-    is_valid_for_prediction = False
     is_fallback_mode = True
 
-    if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-        # 1. 以訓練時的 LAST_OBSERVATION 作為模板，保留其所有歷史/滯後特徵
-        observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
-        
-        latest_row = current_observation_raw.iloc[0]
-        dt_val = latest_row['datetime']
-        if pd.to_datetime(dt_val).tz is not None:
-            # 移除時區資訊以匹配訓練集的特徵生成邏輯
-            dt_val = pd.to_datetime(dt_val).tz_convert(None)
-            
-        # 2. 核心修正: 將當前觀測的時間設置為起始時間 (t=0)
-        observation_for_prediction['datetime'] = dt_val
-
-        # 3. 核心修正: 用當前測站的觀測值覆蓋訓練時儲存的 "最新觀測值" (t=0)
-        #    這確保了預測從當前測站的實際數據開始
-        for col in latest_row.index:
-            # 覆蓋所有污染物、AQI，以及任何天氣欄位
-            if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
-                if col in POLLUTANT_TARGETS:
-                    col_to_match = f'{col}_value' # 匹配訓練集中的 'pm25_value' 格式
-                    if col_to_match in observation_for_prediction.columns:
-                         # 使用最新的濃度值覆蓋 t=0 的輸入值
-                         observation_for_prediction[col_to_match] = latest_row[col]
-                elif col == 'aqi':
-                    # 覆蓋 t=0 的實際 AQI 值
-                    observation_for_prediction['aqi'] = latest_row['aqi']
-                elif col in ['temperature', 'humidity', 'pressure']:
-                    # 覆蓋 t=0 的天氣值 (如果存在)
-                    observation_for_prediction[col] = latest_row[col]
-
-        # 4. 進行額外檢查：用最新的觀測值來更新 t-1 的 LAG_1h 特徵
-        #    這對於遞歸預測的初始步驟至關重要。
-        for param in POLLUTANT_TARGETS:
-             value_col = f'{param}_value'
-             lag_1h_col = f'{param}_lag_1h'
-             if value_col in observation_for_prediction.columns and lag_1h_col in observation_for_prediction.columns:
-                 # 使用當前最新觀測值作為 t-1 的輸入
-                 observation_for_prediction[lag_1h_col] = observation_for_prediction[value_col].iloc[0]
-
-        aqi_lag_1h_col = 'aqi_lag_1h'
-        if 'aqi' in observation_for_prediction.columns and aqi_lag_1h_col in observation_for_prediction.columns:
-             # 使用當前最新 AQI 作為 t-1 的輸入
-             observation_for_prediction[aqi_lag_1h_col] = observation_for_prediction['aqi'].iloc[0]
-
-        # 5. 確保所有必要的特徵列都在
-        if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
-            is_valid_for_prediction = True
-
-    max_aqi = CURRENT_OBSERVATION_AQI
+    # ========== 5️⃣ 建立預測或回退顯示 ==========
     
-    # 進行預測
-    if is_valid_for_prediction and weather_forecast_df.shape[0] == 24:
+    if is_valid_for_prediction and not current_observation_raw.empty:
         try:
+            # 1. 以訓練時的 LAST_OBSERVATION 作為模板，保留其所有歷史/滯後特徵
+            observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
+            
+            latest_row = current_observation_raw.iloc[0]
+            dt_val = CURRENT_OBSERVATION_DT # 使用我們已經驗證過的 Timestamp
+                
+            # 2. 核心修正: 將當前觀測的時間設置為起始時間 (t=0)
+            observation_for_prediction['datetime'] = dt_val
+
+            # 3. 核心修正: 用當前測站的觀測值覆蓋訓練時儲存的 "最新觀測值" (t=0)
+            for col in POLLUTANT_TARGETS:
+                col_to_match = f'{col}_value'
+                if col_to_match in observation_for_prediction.columns:
+                     observation_for_prediction[col_to_match] = latest_row.get(col_to_match, np.nan)
+            
+            if 'aqi' in observation_for_prediction.columns:
+                observation_for_prediction['aqi'] = latest_row.get('aqi', np.nan)
+
+            # 4. 進行額外檢查：用最新的觀測值來更新 t-1 的 LAG_1h 特徵
+            for param in POLLUTANT_TARGETS:
+                 value_col = f'{param}_value'
+                 lag_1h_col = f'{param}_lag_1h'
+                 if value_col in observation_for_prediction.columns and lag_1h_col in observation_for_prediction.columns:
+                     # 使用當前最新觀測值作為 t-1 的輸入
+                     observation_for_prediction[lag_1h_col] = observation_for_prediction[value_col].iloc[0]
+
+            aqi_lag_1h_col = 'aqi_lag_1h'
+            if 'aqi' in observation_for_prediction.columns and aqi_lag_1h_col in observation_for_prediction.columns:
+                 # 使用當前最新 AQI 作為 t-1 的輸入
+                 observation_for_prediction[aqi_lag_1h_col] = observation_for_prediction['aqi'].iloc[0]
+
+
+            # 5. 執行預測
             # 建立 t=0 到 t=24 的完整輸入模板
             full_input_df = get_forecast_input_template(observation_for_prediction, weather_forecast_df)
             
@@ -646,14 +632,17 @@ def index():
             predictions_df = predict_future_multi(full_input_df, TRAINED_MODELS, FEATURE_COLUMNS)
             
             # 準備輸出格式
-            predictions_df['datetime_local'] = pd.to_datetime(predictions_df['datetime']).dt.tz_localize(LOCAL_TZ)
+            predictions_df['datetime_local'] = predictions_df['datetime'].dt.tz_localize(LOCAL_TZ)
             predictions_df = predictions_df.loc[:, ['datetime_local', 'aqi_pred']].copy()
+            
+            # 計算最大預測 AQI
             max_aqi_val = predictions_df['aqi_pred'].max()
-            max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
-            predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
+            max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) and max_aqi_val > 0 else CURRENT_OBSERVATION_AQI
+            
             predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
-                lambda x: int(x) if x != "N/A" else "N/A"
+                lambda x: int(x) if pd.notna(x) else "N/A"
             ).astype(object)
+            
             aqi_predictions = [
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
                 for item in predictions_df.to_dict(orient='records')
@@ -662,10 +651,11 @@ def index():
                 is_fallback_mode = False
                 print("✅ [Request] Prediction successful!")
         except Exception as e:
-            print(f"❌ [Predict] Error: {e}")
+            print(f"❌ [Predict] Error during prediction logic: {e}")
 
     if is_fallback_mode:
         print("🚨 [Fallback Mode] Showing latest observed AQI only.")
+        # 如果當前有觀測值，則只顯示觀測值
         if CURRENT_OBSERVATION_AQI != "N/A":
             aqi_predictions = [{
                 'time': CURRENT_OBSERVATION_TIME,
