@@ -275,11 +275,11 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         
         # 轉換為 DataFrame
         hourly_data = {
-            # ✅ 修正：直接呼叫 hourly.Time() 不帶任何參數，
+            # ✅ 修正：直接呼叫 hourly.Time() 不帶任何參數。
             #    它會返回整個時間戳記陣列（NumPy 格式），避免參數錯誤。
             "datetime": pd.to_datetime(hourly.Time(), unit="s", utc=True),
             
-            # 其餘變數保持不變
+            # 確保其他變數的 ValuesAsNumpy() 也正常呼叫
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), # relative_humidity_2m
             "pressure": hourly.Variables(2).ValuesAsNumpy(), # surface_pressure
