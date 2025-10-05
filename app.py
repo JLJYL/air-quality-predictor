@@ -257,13 +257,11 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
-        # 檢查 responses 是否為空
         if not responses:
              print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
-        # 🚨 關鍵修正：定義 response 變數
-        response = responses[0] 
+        response = responses[0] # 🚨 這是必須的賦值
 
         # 檢查 Hourly 資料
         if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
@@ -272,39 +270,27 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              
         hourly = response.Hourly()
 
-        # ========== 終極修正邏輯 (Time() 繞過) ==========
-        # 獲取穩定的屬性
-        temperature_data = hourly.Variables(0).ValuesAsNumpy()
-        data_points_count = temperature_data.size 
+        # ========== 🎯 最終簡化時間獲取邏輯 ==========
         
-        # 使用 response.Time() 和 response.Interval() 獲取起點和間隔
-        # 繞過 response.Time() 錯誤，直接從 hourly 物件獲取起始時間戳
-        # ⚠️ 注意：如果 hourly.TimeAsNumpy() 失敗，這段程式碼將需要進一步調整。
+        # ⚠️ 這是最後的嘗試：直接呼叫 hourly.Time() 不帶任何參數，
+        #    期望它能返回整個時間戳記陣列（NumPy 格式）。
+        #    這是最接近 Protobuf 原始設計的呼叫方式。
         try:
-             # 嘗試使用最安全的 TimeAsNumpy() 獲取第一個元素作為起點
-             start_timestamp = hourly.TimeAsNumpy()[0] 
-        except AttributeError:
-             # 如果 TimeAsNumpy 不存在，則退而求其次使用有問題的 hourly.Time() 的第一個值
-             # 這是因為我們現在知道錯誤不在於 Time() 的值，而在於迭代的呼叫。
-             start_timestamp = hourly.Time(0)
+             time_stamps = hourly.Time() 
+        except Exception as e:
+             # 如果還是失敗，我們將拋棄整個函式庫，並打印出警告。
+             print(f"❌ [Weather] FATAL ERROR: Cannot retrieve time series from hourly.Time(): {e}")
+             print("🚨 建議：考慮將 openmeteo_requests 降級或改用 requests 函式庫手動解析 JSON。")
+             return pd.DataFrame()
 
-        start_time = pd.to_datetime(start_timestamp, unit="s", utc=True)
-
-        # 保持 Interval 的獲取方式不變（它通常是正確的）
-        interval_seconds = response.Interval()
-
-        # 使用 Pandas date_range 生成時間序列
-        time_series = pd.date_range(
-            start=start_time,
-            periods=data_points_count,
-            freq=f'{interval_seconds}s',
-            tz='UTC'
-        )
 
         # 轉換為 DataFrame
         hourly_data = {
-            "datetime": time_series, 
-            "temperature": temperature_data, 
+            # 將獲取到的時間戳記陣列直接轉換
+            "datetime": pd.to_datetime(time_stamps, unit="s", utc=True),
+            
+            # 其他變數保持不變
+            "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), 
             "pressure": hourly.Variables(2).ValuesAsNumpy(),
         }
