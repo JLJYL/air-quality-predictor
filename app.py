@@ -296,6 +296,60 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         }
         
         df = pd.DataFrame(hourly_data)
+        return df
+
+    except Exception as e:
+        print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
+        return pd.DataFrame()
+
+
+        # 獲取時間間隔 (Interval)
+        # ⚠️ 注意：在 openmeteo_requests 中，Interval 可能是 response 頂層或 Hourly() 內
+        # 由於您剛才的 Time() 失敗，我們假設 Interval 也不在頂層。
+        # 但 Interval 通常不會引發參數錯誤，因此我們嘗試從 response 頂層獲取。
+        try:
+            interval_seconds = response.Interval()
+        except AttributeError:
+             # 如果 Interval 不在 response 頂層，則使用一個合理的預設值 (3600 秒 = 1 小時)
+             interval_seconds = 3600
+             print("⚠️ [Weather] Could not get Interval; assuming 1 hour (3600s).")
+        
+        # 獲取資料點的數量
+        temperature_data = hourly.Variables(0).ValuesAsNumpy()
+        data_points_count = temperature_data.size 
+
+        # ✅ 使用 Pandas date_range 根據 time_stamps 或 data_points_count 生成時間序列
+        
+        # 如果 time_stamps 是一個有效的 NumPy 陣列 (即 TimeAsNumpy() 成功)
+        if hasattr(time_stamps, 'dtype'):
+             time_series = pd.to_datetime(time_stamps, unit="s", utc=True)
+        else:
+             # 否則，使用起始時間和間隔 (這是您上一個修正的邏輯，但這次我們確保 Time() 呼叫正確)
+             # 在 openmeteo_requests 中，response.Time() 確實是獲取起始時間的方法，
+             # 但它需要用 response.Time()，而不是 response.TimeAsNumpy()
+             try:
+                 start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+                 time_series = pd.date_range(
+                     start=start_time,
+                     periods=data_points_count,
+                     freq=f'{interval_seconds}s',
+                     tz='UTC'
+                 )
+             except Exception as e:
+                 print(f"❌ [Weather] Start time method failed: {e}")
+                 return pd.DataFrame()
+
+
+        # 轉換為 DataFrame
+        hourly_data = {
+            "datetime": time_series, 
+            "temperature": temperature_data, 
+            "humidity": hourly.Variables(1).ValuesAsNumpy(), 
+            "pressure": hourly.Variables(2).ValuesAsNumpy(),
+        }
+        
+        df = pd.DataFrame(hourly_data)
+        # ...
         
         # 確保列名與模型特徵匹配
         df = df.rename(columns={
@@ -313,7 +367,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         print(f"✅ [Weather] Fetched {len(df)} hours of weather forecast.")
         
         return df
-
+        
     except Exception as e:
         print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
         return pd.DataFrame()
@@ -792,21 +846,9 @@ def index():
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
                 for item in predictions_df.to_dict(orient='records')
             ]
-            
-            # 🚨 修正圖表問題：在預測成功時，將當前觀測值加入到列表開頭
             if aqi_predictions:
                 is_fallback_mode = False
                 print("✅ [Request] Prediction successful!")
-                
-                if CURRENT_OBSERVATION_AQI != "N/A":
-                    current_obs_point = {
-                        'time': CURRENT_OBSERVATION_TIME,
-                        'aqi': CURRENT_OBSERVATION_AQI,
-                        'is_obs': True # 標記為觀測點
-                    }
-                    # 插入到列表開頭
-                    aqi_predictions.insert(0, current_obs_point)
-
         except Exception as e:
             print(f"❌ [Predict] Error: {e}")
 
@@ -819,7 +861,8 @@ def index():
                 'is_obs': True
             }]
 
-    # ========== 7️⃣ 輸出頁面 ==========\n    return render_template(
+    # ========== 7️⃣ 輸出頁面 ==========
+    return render_template(
         'index.html',
         max_aqi=max_aqi,
         aqi_predictions=aqi_predictions,
