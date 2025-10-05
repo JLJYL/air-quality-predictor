@@ -273,26 +273,14 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              
         hourly = response.Hourly()
         
-        # 獲取時間點的總數 (這一步是安全的)
-        time_points_count = len(hourly.Time()) 
-
-        # ❌ 原先錯誤的程式碼 (列表推導式導致錯誤)
-        # "datetime": pd.to_datetime([hourly.Time(i) for i in range(len(hourly.Time()))], unit="s", utc=True),
-        
-        # ✅ 使用 for 迴圈安全地建構時間列表，並將其替換掉
-        
-        # 建立一個空列表來存儲時間戳記
-        time_stamps = []
-        # 使用傳統 for 迴圈來確保只傳遞一個參數 i
-        for i in range(time_points_count):
-            time_stamps.append(hourly.Time(i))
-
         # 轉換為 DataFrame
         hourly_data = {
-            # 修正：使用 for 迴圈建構的安全列表
-            "datetime": pd.to_datetime(time_stamps, unit="s", utc=True),
+            # ✅ 最終修正：使用 hourly.TimeAsNumpy()。
+            #    這個方法會直接返回整個時間戳記的 NumPy 陣列，不需任何參數，
+            #    從根本上解決「傳遞兩個參數」的問題。
+            "datetime": pd.to_datetime(hourly.TimeAsNumpy(), unit="s", utc=True),
             
-            # 其他變數保持不變
+            # 其他變數保持不變（這些方法通常不會有參數問題）
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), 
             "pressure": hourly.Variables(2).ValuesAsNumpy(),
