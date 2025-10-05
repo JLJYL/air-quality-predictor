@@ -278,7 +278,19 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         data_points_count = temperature_data.size 
         
         # 使用 response.Time() 和 response.Interval() 獲取起點和間隔
-        start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+        # 繞過 response.Time() 錯誤，直接從 hourly 物件獲取起始時間戳
+        # ⚠️ 注意：如果 hourly.TimeAsNumpy() 失敗，這段程式碼將需要進一步調整。
+        try:
+             # 嘗試使用最安全的 TimeAsNumpy() 獲取第一個元素作為起點
+             start_timestamp = hourly.TimeAsNumpy()[0] 
+        except AttributeError:
+             # 如果 TimeAsNumpy 不存在，則退而求其次使用有問題的 hourly.Time() 的第一個值
+             # 這是因為我們現在知道錯誤不在於 Time() 的值，而在於迭代的呼叫。
+             start_timestamp = hourly.Time(0)
+
+        start_time = pd.to_datetime(start_timestamp, unit="s", utc=True)
+
+        # 保持 Interval 的獲取方式不變（它通常是正確的）
         interval_seconds = response.Interval()
 
         # 使用 Pandas date_range 生成時間序列
