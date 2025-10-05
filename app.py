@@ -305,9 +305,11 @@ def get_location_history_df(location_id: int, hours_back: int = 26) -> pd.DataFr
 # Open-Meteo Weather Fetching
 # =================================================================
 # 設置快取和重試
+# app.py (約 307-309 行) - 修正後的代碼
+# 設置快取
 cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-retry_session = openmeteo_requests.create_retry_session(session=cache_session)
-openmeteo_client = openmeteo_requests.Client(session=retry_session)
+# 直接將 CachedSession 傳遞給 Client，它已經內建了重試邏輯。
+openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     """
