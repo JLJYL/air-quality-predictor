@@ -277,7 +277,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         
         # 轉換為 DataFrame
         hourly_data = {
-            "datetime": pd.to_datetime([hourly.Time(i) for i in range(len(hourly.Time()))], unit="s", utc=True),
+            "datetime": pd.to_datetime([hourly.Time(i) for i in range(len(hourly.Time()))], unit="s", utc=True), # ⚠️ 錯誤可能在這裡
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), # relative_humidity_2m
             "pressure": hourly.Variables(2).ValuesAsNumpy(), # surface_pressure
