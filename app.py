@@ -660,7 +660,7 @@ def index():
     global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
     global current_location_id, current_location_name
     global TARGET_LAT, TARGET_LON
-    station_lat, station_lon = TARGET_LAT, TARGET_LON # 預設使用TARGET，如果找到測站則更新
+    station_lat, station_lon = TARGET_LAT, TARGET_LON  # 預設使用 TARGET，如果找到測站則更新
 
     # ========== 1️⃣ 從網址參數抓座標 ==========
     lat_param = request.args.get('lat', type=float)
@@ -677,14 +677,13 @@ def index():
     if loc_id:
         current_location_id = loc_id
         current_location_name = loc_name
-        station_lat, station_lon = lat_found, lon_found # 使用測站的精確坐標來獲取天氣
+        station_lat, station_lon = lat_found, lon_found  # 使用測站的精確坐標來獲取天氣
         print(f"✅ [Nearest Station Found] {loc_name} (ID: {loc_id})")
-        print(f"📍 Station Coordinates : {station_lat}, {station_lon}")
+        print(f"📍 Station Coordinates : {station_lat}, {lon_found}")
     else:
         print("⚠️ [Nearest] No valid station found, fallback to default Kaohsiung")
         current_location_id = DEFAULT_LOCATION_ID
         current_location_name = DEFAULT_LOCATION_NAME
-        # 如果找不到測站，使用 TARGET 坐標來獲取天氣
 
     # ⭐️ 新增：獲取天氣預報
     weather_forecast_df = get_weather_forecast(station_lat, station_lon)
@@ -711,34 +710,77 @@ def index():
         CURRENT_OBSERVATION_AQI = "N/A"
         CURRENT_OBSERVATION_TIME = "N/A"
 
-   # ========== 5️⃣ 建立預測或回退顯示 ==========
-observation_for_prediction = None
-is_valid_for_prediction = False
-is_fallback_mode = True
+    # ========== 5️⃣ 建立預測或回退顯示（方案 A 改版） ==========
+    observation_for_prediction = None
+    is_valid_for_prediction = False
+    is_fallback_mode = True
 
-# ✅ 改用新觀測資料作為預測起點
-if not current_observation_raw.empty:
-    observation_for_prediction = current_observation_raw.copy()
+    # ✅ 改用新觀測資料作為預測起點
+    if not current_observation_raw.empty:
+        observation_for_prediction = current_observation_raw.copy()
 
-    # 確保時間欄位是 UTC-aware
-    observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-    if observation_for_prediction['datetime'].dt.tz is None:
-        observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize('UTC')
-    else:
-        observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
+        # 確保時間欄位是 UTC-aware
+        observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
+        if observation_for_prediction['datetime'].dt.tz is None:
+            observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize('UTC')
+        else:
+            observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
 
-    is_valid_for_prediction = True
-    print("\n🧾 [DEBUG] Observation used for prediction:")
-    print(observation_for_prediction.head(1).T)
-
-else:
-    # ⚠️ 若該地區沒有即時觀測資料，才退回舊的 LAST_OBSERVATION
-    if LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-        observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
         is_valid_for_prediction = True
-        print("⚠️ [Fallback] Using last known observation for prediction.")
+        print("\n🧾 [DEBUG] Observation used for prediction:")
+        print(observation_for_prediction.head(1).T)
 
-    # ========== 6️⃣ 輸出頁面 ==========
+    else:
+        # ⚠️ 若該地區沒有即時觀測資料，才退回舊的 LAST_OBSERVATION
+        if LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
+            observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
+            is_valid_for_prediction = True
+            print("⚠️ [Fallback] Using last known observation for prediction.")
+
+    max_aqi = CURRENT_OBSERVATION_AQI
+    aqi_predictions = []
+
+    # ========== 6️⃣ 模型預測或回退 ==========
+    if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
+        try:
+            # ⭐️ 傳遞天氣預報數據
+            future_predictions = predict_future_multi(
+                TRAINED_MODELS,
+                observation_for_prediction,
+                FEATURE_COLUMNS,
+                POLLUTANT_PARAMS,
+                hours=HOURS_TO_PREDICT,
+                weather_df=weather_forecast_df  # 傳遞 Open-Meteo 預報
+            )
+
+            future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+            predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
+            max_aqi_val = predictions_df['aqi_pred'].max()
+            max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
+            predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
+            predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
+                lambda x: int(x) if x != "N/A" else "N/A"
+            ).astype(object)
+            aqi_predictions = [
+                {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
+                for item in predictions_df.to_dict(orient='records')
+            ]
+            if aqi_predictions:
+                is_fallback_mode = False
+                print("✅ [Request] Prediction successful!")
+        except Exception as e:
+            print(f"❌ [Predict] Error: {e}")
+
+    if is_fallback_mode:
+        print("🚨 [Fallback Mode] Showing latest observed AQI only.")
+        if CURRENT_OBSERVATION_AQI != "N/A":
+            aqi_predictions = [{
+                'time': CURRENT_OBSERVATION_TIME,
+                'aqi': CURRENT_OBSERVATION_AQI,
+                'is_obs': True
+            }]
+
+    # ========== 7️⃣ 輸出頁面 ==========
     return render_template(
         'index.html',
         max_aqi=max_aqi,
@@ -747,6 +789,7 @@ else:
         current_obs_time=CURRENT_OBSERVATION_TIME,
         is_fallback=is_fallback_mode
     )
+
 
 
 if __name__ == '__main__':
