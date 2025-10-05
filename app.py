@@ -257,24 +257,52 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
+        # 檢查 responses 是否為空
+        if not responses:
+             print("❌ [Weather] Open-Meteo returned an empty response list.")
+             return pd.DataFrame()
+             
+        # 🚨 關鍵修正：定義 response 變數
+        response = responses[0] 
+
+        # 檢查 Hourly 資料
         if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
              print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
              return pd.DataFrame()
              
         hourly = response.Hourly()
 
-        # ✅ 修正：所有屬性都從 hourly 物件中獲取
-        # 嘗試使用 TimeAsNumpy()，這是最安全的獲取時間序列的方法
-        try:
-            time_stamps = hourly.TimeAsNumpy()
-        except AttributeError:
-            # 如果 TimeAsNumpy() 也失敗，則使用最原始的 Time() 並期望它能被 Pandas 處理
-            # 如果這個步驟還失敗，我們將無法獲取時間序列
-            try:
-                 time_stamps = hourly.Time()
-            except Exception as e:
-                 print(f"❌ [Weather] Final time retrieval failed: {e}")
-                 return pd.DataFrame()
+        # ========== 終極修正邏輯 (Time() 繞過) ==========
+        # 獲取穩定的屬性
+        temperature_data = hourly.Variables(0).ValuesAsNumpy()
+        data_points_count = temperature_data.size 
+        
+        # 使用 response.Time() 和 response.Interval() 獲取起點和間隔
+        start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+        interval_seconds = response.Interval()
+
+        # 使用 Pandas date_range 生成時間序列
+        time_series = pd.date_range(
+            start=start_time,
+            periods=data_points_count,
+            freq=f'{interval_seconds}s',
+            tz='UTC'
+        )
+
+        # 轉換為 DataFrame
+        hourly_data = {
+            "datetime": time_series, 
+            "temperature": temperature_data, 
+            "humidity": hourly.Variables(1).ValuesAsNumpy(), 
+            "pressure": hourly.Variables(2).ValuesAsNumpy(),
+        }
+        
+        df = pd.DataFrame(hourly_data)
+        return df
+
+    except Exception as e:
+        print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
+        return pd.DataFrame()
 
 
         # 獲取時間間隔 (Interval)
