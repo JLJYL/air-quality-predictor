@@ -69,11 +69,13 @@
 </head>
 
 <body class="p-8 min-h-screen">
+  <!-- 🌍 Loading 畫面 -->
   <div id="loadingOverlay">
       <div class="spinner mb-4"></div>
       <p id="loadingText" class="text-gray-700 text-lg font-medium">正在初始化...</p>
   </div>
 
+  <!-- 🔹 主內容 -->
   <div class="max-w-6xl mx-auto" style="display:none" id="content">
       <header class="text-center mb-10">
           <h2 class="text-4xl font-extrabold text-gray-900 mb-2">
@@ -126,6 +128,7 @@
 
       </div>
 
+      <!-- 📈 AQI Chart -->
       <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
           <h3 class="text-2xl font-bold text-gray-800 mb-4">
               AQI Trend Chart
@@ -139,46 +142,22 @@
   <script>
   // ---------- Chart.js 圖表邏輯 ----------
   window.onload = function() {
-      // 確保在載入完成後顯示內容
-      const contentElement = document.getElementById("content");
-      if (contentElement) {
-          contentElement.style.display = "block";
-      }
+      document.getElementById("content").style.display = "block";
 
       let predictions = [];
       try {
-          // 確保數據是 JSON 格式且被正確解析
           const jsonStr = '{{ aqi_predictions | tojson | safe }}';
           predictions = JSON.parse(jsonStr);
-      } catch (e) { 
-          console.warn("無法解析 AQI 預測資料", e);
-          return; // 無法解析則直接返回
-      }
+      } catch (e) { console.warn("無法解析 AQI 預測資料"); }
 
-      if (!predictions || predictions.length === 0) {
-          console.warn("預測資料為空或無效。");
-          return;
-      }
+      if (!predictions || predictions.length === 0) return;
 
       const labels = predictions.map(p => p.time);
-      // 確保 "N/A" 被轉換為 null，讓 Chart.js 正確處理缺失值
-      const data = predictions.map(p => (p.aqi === "N/A" || p.aqi === null ? null : p.aqi));
-      
-      const ctx = document.getElementById('aqiChart');
-      if (!ctx) return;
-      const chartCtx = ctx.getContext('2d');
-      
-      // ⭐️ 關鍵修正：確保 yMax 計算在 validData 陣列為空時不會返回 -Infinity
-      const validData = data.filter(v => v !== null);
-      const dataMax = validData.length > 0 ? Math.max(...validData) : 100;
-      const yMax = Math.ceil(dataMax / 50) * 50 + 10;
-      
-      // 避免重複初始化 Chart.js 實例
-      if (window.aqiChartInstance) {
-          window.aqiChartInstance.destroy();
-      }
+      const data = predictions.map(p => (p.aqi === "N/A" ? null : p.aqi));
+      const ctx = document.getElementById('aqiChart').getContext('2d');
+      const yMax = Math.ceil(Math.max(...data.filter(v => v !== null)) / 50) * 50 + 10;
 
-      window.aqiChartInstance = new Chart(chartCtx, {
+      new Chart(ctx, {
           type: 'line',
           data: {
               labels: labels,
@@ -192,7 +171,6 @@
                   tension: 0.4,
                   pointRadius: 5,
                   pointBackgroundColor: data.map(v => {
-                      if (v === null) return '#9CA3AF'; // 對於缺失值使用灰色
                       if (v <= 50) return '#10B981';
                       if (v <= 100) return '#EAB308';
                       if (v <= 150) return '#F97316';
@@ -219,26 +197,7 @@
                           maxRotation: 45, minRotation: 45,
                           callback: function(value, index) {
                               const fullLabel = this.getLabelForValue(value);
-                              // 每 6 小時顯示完整的日期時間，否則只顯示時間
                               return (index % 6 === 0) ? fullLabel : fullLabel.split(' ')[1];
-                          }
-                      }
-                  }
-              },
-              plugins: {
-                  tooltip: {
-                      callbacks: {
-                          label: function(context) {
-                              let label = context.dataset.label || '';
-                              if (label) {
-                                  label += ': ';
-                              }
-                              if (context.parsed.y !== null) {
-                                  label += context.parsed.y;
-                              } else {
-                                  label += 'N/A';
-                              }
-                              return label;
                           }
                       }
                   }
