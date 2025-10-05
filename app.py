@@ -261,29 +261,27 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
-        response = responses[0]
-        
-        # ✅ 使用新的檢查邏輯：確保 hourly 資料存在且有內容
-        if not response.Hourly() or response.Hourly().Time(0) == 0:
-             print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
-             return pd.DataFrame()
+        # 確保您已經在前面修正了 IsInitialized 的檢查
+    # ...
 
+        response = responses[0]
         hourly = response.Hourly()
         
-        # ... (其餘程式碼)
+        # 獲取時間點的數量
+        time_points_count = len(hourly.Time())
         
-        # 轉換為 DataFrame
-        # ... (其餘程式碼保持不變)
-        
-        # 轉換為 DataFrame
+        # 修正後的程式碼：只需要傳遞一個索引 i 給 hourly.Time()
+        # 或是使用更簡潔的 np.array 方式獲取所有時間
         hourly_data = {
-            "datetime": pd.to_datetime([hourly.Time(i) for i in range(len(hourly.Time()))], unit="s", utc=True), # ⚠️ 錯誤可能在這裡
+            # 修正：確保只傳遞索引 i
+            "datetime": pd.to_datetime([hourly.Time(i) for i in range(time_points_count)], unit="s", utc=True),
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), # relative_humidity_2m
             "pressure": hourly.Variables(2).ValuesAsNumpy(), # surface_pressure
         }
         
         df = pd.DataFrame(hourly_data)
+        # ...
         
         # 確保列名與模型特徵匹配
         df = df.rename(columns={
