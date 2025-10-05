@@ -827,8 +827,19 @@ def index():
                 weather_df=weather_forecast_df  # 傳遞 Open-Meteo 預報
             )
 
-            future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+            if 'datetime' in future_predictions.columns:
+                future_predictions['datetime'] = pd.to_datetime(future_predictions['datetime'])
+                if future_predictions['datetime'].dt.tz is None:
+                    future_predictions['datetime'] = future_predictions['datetime'].dt.tz_localize('UTC')
+                future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
+            else:
+                print("❌ [ERROR] No datetime column in predictions")
+    
             predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
+            
+            # 檢查資料完整性
+            print(f"📊 [DEBUG] Predictions DataFrame shape: {predictions_df.shape}")
+            print(f"📊 [DEBUG] First 3 predictions:\n{predictions_df.head(3)}")
             max_aqi_val = predictions_df['aqi_pred'].max()
             max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
             predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
