@@ -835,6 +835,13 @@ def index():
             predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
                 lambda x: int(x) if x != "N/A" else "N/A"
             ).astype(object)
+            
+            # 🚨 關鍵修正：確保預測結果的索引唯一性 (解決 'DataFrame index must be unique' 錯誤)
+            if predictions_df['datetime_local'].duplicated().any():
+                print("⚠️ [Predict] Duplicated prediction times found. Dropping duplicate rows.")
+                # 以時間為準，保留第一個預測值，丟棄所有重複的時間點。
+                predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first').reset_index(drop=True)
+
             aqi_predictions = [
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
                 for item in predictions_df.to_dict(orient='records')
