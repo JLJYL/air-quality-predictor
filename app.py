@@ -839,19 +839,9 @@ def index():
             # 🚨 關鍵修正：確保預測結果的索引唯一性 (解決 'DataFrame index must be unique' 錯誤)
             if predictions_df['datetime_local'].duplicated().any():
                 print("⚠️ [Predict] Duplicated prediction times found. Dropping duplicate rows.")
-                predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first')
-                
-            # 2. 清理所有現有索引，並分配新的、唯一的整數索引。
-            predictions_df = predictions_df.reset_index(drop=True)
-            
-            # 3. 檢查新的索引是否唯一 (這是 to_dict 要求的)
-            if not predictions_df.index.is_unique:
-                 # 如果重置後索引還不唯一，則強制創建一個唯一的 RangeIndex
-                 predictions_df.index = pd.RangeIndex(len(predictions_df))
-                 print("⚠️ [Predict] Index forced unique using RangeIndex.")
+                # 以時間為準，保留第一個預測值，丟棄所有重複的時間點。
+                predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first').reset_index(drop=True)
 
-
-            # 從這裡開始，您原本的 to_dict 呼叫應該就會成功了：
             aqi_predictions = [
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
                 for item in predictions_df.to_dict(orient='records')
