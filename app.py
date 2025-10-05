@@ -711,68 +711,32 @@ def index():
         CURRENT_OBSERVATION_AQI = "N/A"
         CURRENT_OBSERVATION_TIME = "N/A"
 
-    # ========== 5️⃣ 建立預測或回退顯示 ==========
-    observation_for_prediction = None
-    is_valid_for_prediction = False
-    is_fallback_mode = True
+   # ========== 5️⃣ 建立預測或回退顯示 ==========
+observation_for_prediction = None
+is_valid_for_prediction = False
+is_fallback_mode = True
 
-    if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
+# ✅ 改用新觀測資料作為預測起點
+if not current_observation_raw.empty:
+    observation_for_prediction = current_observation_raw.copy()
+
+    # 確保時間欄位是 UTC-aware
+    observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
+    if observation_for_prediction['datetime'].dt.tz is None:
+        observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize('UTC')
+    else:
+        observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
+
+    is_valid_for_prediction = True
+    print("\n🧾 [DEBUG] Observation used for prediction:")
+    print(observation_for_prediction.head(1).T)
+
+else:
+    # ⚠️ 若該地區沒有即時觀測資料，才退回舊的 LAST_OBSERVATION
+    if LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
         observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
-        latest_row = current_observation_raw.iloc[0]
-        dt_val = latest_row['datetime']
-        if pd.to_datetime(dt_val).tz is not None:
-            dt_val = pd.to_datetime(dt_val).tz_convert(None)
-        observation_for_prediction['datetime'] = dt_val
-
-        for col in latest_row.index:
-            if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
-                if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
-                    observation_for_prediction[col] = latest_row[col]
-
-        if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
-            is_valid_for_prediction = True
-
-    max_aqi = CURRENT_OBSERVATION_AQI
-    aqi_predictions = []
-
-    if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
-        try:
-            # ⭐️ 傳遞天氣預報數據
-            future_predictions = predict_future_multi(
-                TRAINED_MODELS,
-                observation_for_prediction,
-                FEATURE_COLUMNS,
-                POLLUTANT_PARAMS,
-                hours=HOURS_TO_PREDICT,
-                weather_df=weather_forecast_df # 傳遞 Open-Meteo 預報
-            )
-            
-            future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-            predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
-            max_aqi_val = predictions_df['aqi_pred'].max()
-            max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
-            predictions_df['aqi_pred'] = predictions_df['aqi_pred'].replace(np.nan, "N/A")
-            predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
-                lambda x: int(x) if x != "N/A" else "N/A"
-            ).astype(object)
-            aqi_predictions = [
-                {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
-                for item in predictions_df.to_dict(orient='records')
-            ]
-            if aqi_predictions:
-                is_fallback_mode = False
-                print("✅ [Request] Prediction successful!")
-        except Exception as e:
-            print(f"❌ [Predict] Error: {e}")
-
-    if is_fallback_mode:
-        print("🚨 [Fallback Mode] Showing latest observed AQI only.")
-        if CURRENT_OBSERVATION_AQI != "N/A":
-            aqi_predictions = [{
-                'time': CURRENT_OBSERVATION_TIME,
-                'aqi': CURRENT_OBSERVATION_AQI,
-                'is_obs': True
-            }]
+        is_valid_for_prediction = True
+        print("⚠️ [Fallback] Using last known observation for prediction.")
 
     # ========== 6️⃣ 輸出頁面 ==========
     return render_template(
