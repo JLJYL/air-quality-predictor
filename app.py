@@ -40,7 +40,7 @@ TARGET_LAT = 22.6324
 TARGET_LON = 120.2954
 
 # Initial/Default Location (These will be updated by initialize_location)
-DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin
+DEFAULT_LOCATION_ID = 2395624 # Default: Kaohsiung-Qianjin (模型訓練時常用的穩定 ID)
 DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin" # Default Location Name
 
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
@@ -106,7 +106,7 @@ def get_location_meta(location_id: int):
 # =================================================================
 # V3 API 穩健定位函式 (修正 422 錯誤)
 # =================================================================
-def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
+def get_nearest_location(lat: float, lon: float, radius_km: int = 50): 
     """
     Searches for the closest monitoring station using V3 API with simplified parameters.
     Now returns both ID, name, and coordinates.
@@ -114,7 +114,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
     V3_LOCATIONS_URL = f"{BASE}/locations" 
     params = {
         "coordinates": f"{lat},{lon}",
-        "radius": 20000,
+        "radius": 50000, # 擴大搜索半徑到 50km
         "limit": 5,
     }
     try:
@@ -123,10 +123,10 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         results = r.json().get("results", [])
 
         if not results:
-            print("🚨 [Nearest] No stations found within 25km.")
+            print("🚨 [Nearest] No stations found within 50km.")
             return None, None, None, None
 
-        # 直接使用第一個（最近）站，無論有沒有 PM2.5
+        # 直接使用第一個（最近）站
         nearest = results[0]
         loc_id = int(nearest["id"])
         loc_name = nearest["name"]
@@ -155,8 +155,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
             return pd.DataFrame()
         r.raise_for_status()
         results = r.json().get("results", [])
-        print("\n🌍 [DEBUG] Raw stations returned by OpenAQ:")
-        # print(json.dumps(results, indent=2, ensure_ascii=False)) # Commented out for cleaner output
+        # print("\n🌍 [DEBUG] Raw stations returned by OpenAQ:") # Commented out for cleaner output
 
         if not results:
             return pd.DataFrame()
@@ -304,11 +303,8 @@ def get_location_history_df(location_id: int, hours_back: int = 26) -> pd.DataFr
 # =================================================================
 # Open-Meteo Weather Fetching
 # =================================================================
-# 設置快取和重試
-# app.py (約 307-309 行) - 修正後的代碼
-# 設置快取
+# 設置快取 (修正: 移除 create_retry_session，直接使用 CachedSession)
 cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-# 直接將 CachedSession 傳遞給 Client，它已經內建了重試邏輯。
 openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
@@ -328,11 +324,19 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
-        if not responses or not responses[0].IsInitialized():
-             print("❌ [Weather] Open-Meteo did not return initialized data.")
+        # 穩健性檢查 (修正: 避免使用 IsInitialized 方法的潛在版本問題)
+        if not responses or len(responses) == 0:
+             print("❌ [Weather] Open-Meteo did not return any responses.")
+             return pd.DataFrame()
+
+        response = responses[0]
+        
+        # 檢查 Hourly 資料是否真的存在且有長度
+        # 這裡仍然使用 IsInitialized() 配合 Hourly() 的檢查來確保數據完整性
+        if not response.IsInitialized() or response.Hourly().Time(0) is None:
+             print("❌ [Weather] Open-Meteo response not initialized or missing hourly data.")
              return pd.DataFrame()
              
-        response = responses[0]
         hourly = response.Hourly()
         
         # 轉換為 DataFrame
@@ -540,8 +544,6 @@ def generate_features_for_prediction(history_df: pd.DataFrame, feature_cols: lis
             lag_col = f'{param}_lag_{lag}h'
             if lag_col in feature_cols and param in df_features.columns:
                 # 簡單地從過去 N 小時的觀測中取值
-                # 注意：這裡的 shift 是負數，因為我們要用當前行來預測下一行（但這裡我們是為最後一行做特徵準備）
-                # 在預測模式下，我們只需要最後一個觀測點的滯後特徵
                 df_features[lag_col] = df_features[param].shift(lag)
 
 
@@ -583,10 +585,6 @@ def generate_features_for_prediction(history_df: pd.DataFrame, feature_cols: lis
     # 並用 0 填充最前端的 NaN
     final_input_df = final_input_df.fillna(method='ffill', axis=1).fillna(0)
     
-    # 驗證最重要的滯後特徵是否是 0 (如果歷史數據不足24小時，可能會是0)
-    # print("\n[DEBUG] Feature Input - Lag/Rolling Check:")
-    # print(final_input_df.iloc[0].filter(regex='(lag_|rolling_)').head(10).to_string())
-
     print(f"✅ [Feature Eng] Generated 1 observation row with {len(final_input_df.columns) - 1} features.")
     return final_input_df
 
@@ -693,10 +691,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
                 pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
 
-                # # 印出資料內容 (前 10 欄) - 註釋掉以減少輸出
-                # print(f"\n📦 [Model Input for {param.upper()} — Hour +{h+1}] (feature count = {len(feature_cols)})")
-                # print(pd.DataFrame(pred_input, columns=feature_cols).iloc[:, :10])
-
                 pred = model.predict(pred_input)[0]
                 pred = max(0, pred)
 
@@ -734,9 +728,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     roll_mean_col = f'{param}_rolling_{window}h_mean'
                     roll_std_col = f'{param}_rolling_{window}h_std'
                     
-                    # 滾動視窗邏輯需要歷史值，這裡使用簡易遞迴更新：
-                    # (這是一個簡化，準確的滾動需要維護一個長度為 24 的序列，但這個簡化通常能工作)
-                    
                     if roll_mean_col in current_data_dict:
                         # 使用 EWMA 模擬滾動平均更新
                         alpha = 2 / (window + 1)
@@ -747,7 +738,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                         current_data_dict[roll_mean_col] = (1 - alpha) * old_mean + alpha * new_value
                         
                     # 滾動標準差的遞迴更新非常複雜，這裡暫時保持不變 (使用前一時刻的值)
-                    # 如果模型很依賴標準差，則需要更複雜的序列維護
 
         # 總結印出結果
         print(f"\n✅ [Summary] 模型共收到 {total_predictions} 筆輸入資料，"
@@ -844,8 +834,9 @@ def index():
     else:
         print(f"⚙️ [Request] No coordinates provided, using default → lat={TARGET_LAT}, lon={TARGET_LON}")
 
-    # ========== 2️⃣ 找最近測站 ==========
+    # ========== 2️⃣ 找最近測站 (如果失敗，使用 DEFAULT 測站) ==========
     loc_id, loc_name, lat_found, lon_found = get_nearest_location(TARGET_LAT, TARGET_LON)
+    
     if loc_id:
         current_location_id = loc_id
         current_location_name = loc_name
@@ -853,7 +844,8 @@ def index():
         print(f"✅ [Nearest Station Found] {loc_name} (ID: {loc_id})")
         print(f"📍 Station Coordinates : {station_lat}, {station_lon}")
     else:
-        print("⚠️ [Nearest] No valid station found, fallback to default Kaohsiung")
+        # 強制使用 DEFAULT_LOCATION_ID 來確保歷史數據獲取有更高的成功率
+        print(f"⚠️ [Nearest] No valid station found, fallback to default model station: {DEFAULT_LOCATION_NAME}")
         current_location_id = DEFAULT_LOCATION_ID
         current_location_name = DEFAULT_LOCATION_NAME
         # 如果找不到測站，使用 TARGET 坐標來獲取天氣
@@ -864,7 +856,9 @@ def index():
     # ========== 3️⃣ 取得觀測資料 (修正：新增歷史資料獲取) ==========
     # 獲取單一最新觀測點
     current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
+    
     # 獲取歷史趨勢數據 (用於計算滯後特徵)
+    # 注意：如果 current_location_id 的歷史數據 404，這裡可能會失敗
     historical_df = get_location_history_df(current_location_id, hours_back=26) 
 
 
@@ -910,12 +904,13 @@ def index():
                     if col in latest_row and col in obs_with_features.columns:
                          obs_with_features[col] = latest_row[col]
                          
-                # 確保將天氣數據的最新觀測值也放入 (模型訓練時可能使用了觀測氣象)
+                # 確保將天氣數據的第一小時預報值也放入 (用於 t=0 的天氣特徵)
                 if not weather_forecast_df.empty and 'temperature' in obs_with_features.columns:
                      latest_weather = weather_forecast_df.iloc[0].to_dict()
                      for w_col in ['temperature', 'humidity', 'pressure']:
                          if w_col in obs_with_features.columns and w_col in latest_weather:
-                              obs_with_features[w_col] = latest_weather.get(w_col, obs_with_features[w_col].iloc[0]) # 使用預報的第一小時值
+                              # 使用預報的第一小時值（即 t+1 的預報，作為 t=0 的天氣觀測的替代）
+                              obs_with_features[w_col] = latest_weather.get(w_col, obs_with_features[w_col].iloc[0]) 
                 
                 observation_for_prediction = obs_with_features
                 
