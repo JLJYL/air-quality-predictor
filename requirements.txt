@@ -7,5 +7,7 @@ xgboost
 matplotlib
 seaborn
 meteostat
-tzdata  # 處理時區依賴
-gunicorn # 用於部署的 Web 服務器
+tzdata
+gunicorn
+openmeteo-requests
+requests-cache
