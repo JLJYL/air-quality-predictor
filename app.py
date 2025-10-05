@@ -263,12 +263,14 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              
         response = responses[0]
         
-        # ✅ 新的檢查：檢查是否有 Hourly 資料
-        if not response.Hourly() or not response.Hourly().Variables(0).ValuesAsNumpy().size:
-             print("❌ [Weather] Open-Meteo response is missing hourly data.")
+        # ✅ 使用新的檢查邏輯：確保 hourly 資料存在且有內容
+        if not response.Hourly() or response.Hourly().Time(0) == 0:
+             print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
              return pd.DataFrame()
-             
+
         hourly = response.Hourly()
+        
+        # ... (其餘程式碼)
         
         # 轉換為 DataFrame
         # ... (其餘程式碼保持不變)
