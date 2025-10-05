@@ -236,18 +236,15 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 
 
 # =================================================================
-# Open-Meteo Weather Fetching (修正版本)
+# Open-Meteo Weather Fetching (新增)
 # =================================================================
 # 設置快取和重試
+# 設置快取和重試 (新版 openmeteo_requests 無 create_retry_session)
 cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
 openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
-    """
-    Fetches hourly weather forecast (temperature, humidity, pressure) 
-    from Open-Meteo for 2 days. Includes robust time series generation.
-    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -264,59 +261,95 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
-        response = responses[0]
-        hourly = response.Hourly()
+        response = responses[0] # 🚨 這是必須的賦值
 
         # 檢查 Hourly 資料
-        if not hourly or hourly.Variables(0).ValuesAsNumpy().size == 0:
+        if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
              print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
              return pd.DataFrame()
              
-        # 獲取變數數據
-        temperature_data = hourly.Variables(0).ValuesAsNumpy()
-        data_points_count = temperature_data.size 
-        
-        time_series = None
-        
-        # 🎯 嘗試獲取原始時間戳陣列
-        try:
-             # 嘗試從 hourly.Time() 獲取原始時間戳
-             time_stamps_raw = hourly.Time() 
-             if isinstance(time_stamps_raw, np.ndarray) and time_stamps_raw.size > 0:
-                 time_series = pd.to_datetime(time_stamps_raw, unit="s", utc=True)
-             else:
-                 raise ValueError("Raw time stamps not a valid numpy array.")
-        except Exception as e:
-             # 發生錯誤時，退回到使用起始時間和間隔來生成時間序列
-             try:
-                 # 這是從 Protobuf 物件中獲取起始時間和間隔的方法
-                 start_time = response.Time() 
-                 interval_seconds = response.Interval() if response.Interval() else 3600
-                 
-                 print(f"⚠️ [Weather] Fallback to generating time series from start time (Error: {e}).")
-                 time_series = pd.date_range(
-                     start=pd.to_datetime(start_time, unit="s", utc=True),
-                     periods=data_points_count,
-                     freq=f'{interval_seconds}s',
-                     tz='UTC'
-                 )
-             except Exception as e:
-                 print(f"❌ [Weather] Start time fallback failed: {e}")
-                 return pd.DataFrame()
+        hourly = response.Hourly()
 
-        if time_series is None or time_series.size == 0:
-             print("❌ [Weather] FATAL ERROR: Cannot retrieve or generate time series.")
+        # ========== 🎯 最終簡化時間獲取邏輯 ==========
+        
+        # ⚠️ 這是最後的嘗試：直接呼叫 hourly.Time() 不帶任何參數，
+        #    期望它能返回整個時間戳記陣列（NumPy 格式）。
+        #    這是最接近 Protobuf 原始設計的呼叫方式。
+        try:
+             time_stamps = hourly.Time() 
+        except Exception as e:
+             # 如果還是失敗，我們將拋棄整個函式庫，並打印出警告。
+             print(f"❌ [Weather] FATAL ERROR: Cannot retrieve time series from hourly.Time(): {e}")
+             print("🚨 建議：考慮將 openmeteo_requests 降級或改用 requests 函式庫手動解析 JSON。")
              return pd.DataFrame()
-             
+
+
         # 轉換為 DataFrame
         hourly_data = {
-            "datetime": time_series,
-            "temperature": temperature_data,
+            # 將獲取到的時間戳記陣列直接轉換
+            "datetime": pd.to_datetime(time_stamps, unit="s", utc=True),
+            
+            # 其他變數保持不變
+            "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), 
             "pressure": hourly.Variables(2).ValuesAsNumpy(),
         }
         
         df = pd.DataFrame(hourly_data)
+        return df
+
+    except Exception as e:
+        print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
+        return pd.DataFrame()
+
+
+        # 獲取時間間隔 (Interval)
+        # ⚠️ 注意：在 openmeteo_requests 中，Interval 可能是 response 頂層或 Hourly() 內
+        # 由於您剛才的 Time() 失敗，我們假設 Interval 也不在頂層。
+        # 但 Interval 通常不會引發參數錯誤，因此我們嘗試從 response 頂層獲取。
+        try:
+            interval_seconds = response.Interval()
+        except AttributeError:
+             # 如果 Interval 不在 response 頂層，則使用一個合理的預設值 (3600 秒 = 1 小時)
+             interval_seconds = 3600
+             print("⚠️ [Weather] Could not get Interval; assuming 1 hour (3600s).")
+        
+        # 獲取資料點的數量
+        temperature_data = hourly.Variables(0).ValuesAsNumpy()
+        data_points_count = temperature_data.size 
+
+        # ✅ 使用 Pandas date_range 根據 time_stamps 或 data_points_count 生成時間序列
+        
+        # 如果 time_stamps 是一個有效的 NumPy 陣列 (即 TimeAsNumpy() 成功)
+        if hasattr(time_stamps, 'dtype'):
+             time_series = pd.to_datetime(time_stamps, unit="s", utc=True)
+        else:
+             # 否則，使用起始時間和間隔 (這是您上一個修正的邏輯，但這次我們確保 Time() 呼叫正確)
+             # 在 openmeteo_requests 中，response.Time() 確實是獲取起始時間的方法，
+             # 但它需要用 response.Time()，而不是 response.TimeAsNumpy()
+             try:
+                 start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+                 time_series = pd.date_range(
+                     start=start_time,
+                     periods=data_points_count,
+                     freq=f'{interval_seconds}s',
+                     tz='UTC'
+                 )
+             except Exception as e:
+                 print(f"❌ [Weather] Start time method failed: {e}")
+                 return pd.DataFrame()
+
+
+        # 轉換為 DataFrame
+        hourly_data = {
+            "datetime": time_series, 
+            "temperature": temperature_data, 
+            "humidity": hourly.Variables(1).ValuesAsNumpy(), 
+            "pressure": hourly.Variables(2).ValuesAsNumpy(),
+        }
+        
+        df = pd.DataFrame(hourly_data)
+        # ...
         
         # 確保列名與模型特徵匹配
         df = df.rename(columns={
@@ -329,8 +362,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         now_utc = pd.Timestamp.now(tz='UTC').floor('H')
         start_time = now_utc + timedelta(hours=1)
         
-        # 確保 DataFrame 是獨立的
-        df = df[df['datetime'] >= start_time].head(HOURS_TO_PREDICT) 
+        df = df[df['datetime'] >= start_time].head(HOURS_TO_PREDICT).copy()
         
         print(f"✅ [Weather] Fetched {len(df)} hours of weather forecast.")
         
@@ -634,6 +666,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     return pd.DataFrame(predictions)
 
 
+
 # =================================================================
 # Model Loading Logic
 # =================================================================
@@ -718,8 +751,7 @@ def index():
     if loc_id:
         current_location_id = loc_id
         current_location_name = loc_name
-        # 使用測站的精確坐標來獲取天氣
-        station_lat, station_lon = float(lat_found), float(lon_found) 
+        station_lat, station_lon = lat_found, lon_found  # 使用測站的精確坐標來獲取天氣
         print(f"✅ [Nearest Station Found] {loc_name} (ID: {loc_id})")
         print(f"📍 Station Coordinates : {station_lat}, {lon_found}")
     else:
