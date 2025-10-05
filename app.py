@@ -788,7 +788,7 @@ def index():
         city_name=current_location_name,
         current_obs_time=CURRENT_OBSERVATION_TIME,
         is_fallback=is_fallback_mode
-    )
+)
 
 
 
