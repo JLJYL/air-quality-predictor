@@ -265,16 +265,21 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     # ...
 
         response = responses[0]
+        
+        # 確保有 hourly 資料的檢查 (您上次應該已經修正了 IsInitialized)
+        if not response.Hourly() or response.Hourly().Time(0) == 0:
+             print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
+             return pd.DataFrame()
+             
         hourly = response.Hourly()
         
-        # 獲取時間點的數量
-        time_points_count = len(hourly.Time())
-        
-        # 修正後的程式碼：只需要傳遞一個索引 i 給 hourly.Time()
-        # 或是使用更簡潔的 np.array 方式獲取所有時間
+        # 轉換為 DataFrame
         hourly_data = {
-            # 修正：確保只傳遞索引 i
-            "datetime": pd.to_datetime([hourly.Time(i) for i in range(time_points_count)], unit="s", utc=True),
+            # ✅ 修正：直接呼叫 hourly.Time() 不帶任何參數，
+            #    它會返回整個時間戳記陣列（NumPy 格式），避免參數錯誤。
+            "datetime": pd.to_datetime(hourly.Time(), unit="s", utc=True),
+            
+            # 其餘變數保持不變
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), # relative_humidity_2m
             "pressure": hourly.Variables(2).ValuesAsNumpy(), # surface_pressure
