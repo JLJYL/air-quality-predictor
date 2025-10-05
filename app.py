@@ -267,20 +267,33 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         response = responses[0]
         
         # 確保有 hourly 資料的檢查 (您上次應該已經修正了 IsInitialized)
-        if not response.Hourly() or response.Hourly().Time(0) == 0:
+        if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
              print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
              return pd.DataFrame()
              
         hourly = response.Hourly()
+
+        # 獲取時間序列的起始時間 (Time()) 和時間間隔 (Interval())
+        # response.Time() 和 response.Interval() 通常不會像 hourly.Time() 那樣出錯
+        start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+        interval_seconds = response.Interval()
         
+        # 獲取資料點的數量 (這是安全的)
+        data_points_count = hourly.Variables(0).ValuesAsNumpy().size
+        
+        # ✅ 終極修正：使用 Pandas 的 date_range 根據起點、間隔和數量來生成時間序列
+        time_series = pd.date_range(
+            start=start_time,
+            periods=data_points_count,
+            freq=f'{interval_seconds}s', # 將間隔秒數轉換為 Pandas 頻率字串
+            tz='UTC'
+        )
+
         # 轉換為 DataFrame
         hourly_data = {
-            # ✅ 最終修正：使用 hourly.TimeAsNumpy()。
-            #    這個方法會直接返回整個時間戳記的 NumPy 陣列，不需任何參數，
-            #    從根本上解決「傳遞兩個參數」的問題。
-            "datetime": pd.to_datetime(hourly.TimeAsNumpy(), unit="s", utc=True),
+            "datetime": time_series, # 使用生成的時間序列
             
-            # 其他變數保持不變（這些方法通常不會有參數問題）
+            # 其他變數保持不變
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
             "humidity": hourly.Variables(1).ValuesAsNumpy(), 
             "pressure": hourly.Variables(2).ValuesAsNumpy(),
