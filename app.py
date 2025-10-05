@@ -245,28 +245,33 @@ openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
-    """
-    Fetches 24-hour weather forecast for the given coordinates from Open-Meteo.
-    Returns a DataFrame with 'datetime', 'temperature', 'humidity', 'pressure'.
-    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": ["temperature_2m", "relative_humidity_2m", "surface_pressure"],
         "timezone": "UTC",
-        "forecast_days": 2, # 獲取足夠多的數據來覆蓋接下來 24 小時
+        "forecast_days": 2, 
     }
     
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
-        if not responses or not responses[0].IsInitialized():
-             print("❌ [Weather] Open-Meteo did not return initialized data.")
+        if not responses:
+             print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
         response = responses[0]
+        
+        # ✅ 新的檢查：檢查是否有 Hourly 資料
+        if not response.Hourly() or not response.Hourly().Variables(0).ValuesAsNumpy().size:
+             print("❌ [Weather] Open-Meteo response is missing hourly data.")
+             return pd.DataFrame()
+             
         hourly = response.Hourly()
+        
+        # 轉換為 DataFrame
+        # ... (其餘程式碼保持不變)
         
         # 轉換為 DataFrame
         hourly_data = {
