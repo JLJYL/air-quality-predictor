@@ -239,9 +239,10 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 # Open-Meteo Weather Fetching (新增)
 # =================================================================
 # 設置快取和重試
-cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-retry_session = openmeteo_requests.create_retry_session(session=cache_session)
-openmeteo_client = openmeteo_requests.Client(session=retry_session)
+# 設置快取和重試 (新版 openmeteo_requests 無 create_retry_session)
+cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
+openmeteo_client = openmeteo_requests.Client(session=cache_session)
+
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     """
