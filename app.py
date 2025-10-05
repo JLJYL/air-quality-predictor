@@ -849,6 +849,16 @@ def index():
             if aqi_predictions:
                 is_fallback_mode = False
                 print("✅ [Request] Prediction successful!")
+                
+                # 🚨 修正圖表問題：在預測成功時，將當前觀測值加入到列表開頭
+                if CURRENT_OBSERVATION_AQI != "N/A":
+                    current_obs_point = {
+                        'time': CURRENT_OBSERVATION_TIME,
+                        'aqi': CURRENT_OBSERVATION_AQI,
+                        'is_obs': True # 標記為觀測點
+                    }
+                    # 插入到列表開頭，作為圖表的起點
+                    aqi_predictions.insert(0, current_obs_point)
         except Exception as e:
             print(f"❌ [Predict] Error: {e}")
 
