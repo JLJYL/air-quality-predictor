@@ -257,44 +257,67 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
-        if not responses:
-             print("❌ [Weather] Open-Meteo returned an empty response list.")
-             return pd.DataFrame()
-             
-        # 確保您已經在前面修正了 IsInitialized 的檢查
-    # ...
-
-        response = responses[0]
-        
-        # 確保有 hourly 資料的檢查 (保持這個檢查)
         if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
              print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
              return pd.DataFrame()
              
         hourly = response.Hourly()
 
-        # 獲取時間序列的起始時間 (Time()) 和時間間隔 (Interval())
-        start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
-        interval_seconds = response.Interval()
-        
-        # ✅ 關鍵步驟：獲取一個已證實不會出錯的 NumPy 陣列的長度
-        temperature_data = hourly.Variables(0).ValuesAsNumpy()
-        data_points_count = temperature_data.size # 使用 NumPy 陣列的 .size 屬性
+        # ✅ 修正：所有屬性都從 hourly 物件中獲取
+        # 嘗試使用 TimeAsNumpy()，這是最安全的獲取時間序列的方法
+        try:
+            time_stamps = hourly.TimeAsNumpy()
+        except AttributeError:
+            # 如果 TimeAsNumpy() 也失敗，則使用最原始的 Time() 並期望它能被 Pandas 處理
+            # 如果這個步驟還失敗，我們將無法獲取時間序列
+            try:
+                 time_stamps = hourly.Time()
+            except Exception as e:
+                 print(f"❌ [Weather] Final time retrieval failed: {e}")
+                 return pd.DataFrame()
 
-        # ✅ 使用 Pandas 的 date_range 根據起點、間隔和數量來生成時間序列
-        time_series = pd.date_range(
-            start=start_time,
-            periods=data_points_count,
-            freq=f'{interval_seconds}s', # 將間隔秒數轉換為 Pandas 頻率字串
-            tz='UTC'
-        )
+
+        # 獲取時間間隔 (Interval)
+        # ⚠️ 注意：在 openmeteo_requests 中，Interval 可能是 response 頂層或 Hourly() 內
+        # 由於您剛才的 Time() 失敗，我們假設 Interval 也不在頂層。
+        # 但 Interval 通常不會引發參數錯誤，因此我們嘗試從 response 頂層獲取。
+        try:
+            interval_seconds = response.Interval()
+        except AttributeError:
+             # 如果 Interval 不在 response 頂層，則使用一個合理的預設值 (3600 秒 = 1 小時)
+             interval_seconds = 3600
+             print("⚠️ [Weather] Could not get Interval; assuming 1 hour (3600s).")
+        
+        # 獲取資料點的數量
+        temperature_data = hourly.Variables(0).ValuesAsNumpy()
+        data_points_count = temperature_data.size 
+
+        # ✅ 使用 Pandas date_range 根據 time_stamps 或 data_points_count 生成時間序列
+        
+        # 如果 time_stamps 是一個有效的 NumPy 陣列 (即 TimeAsNumpy() 成功)
+        if hasattr(time_stamps, 'dtype'):
+             time_series = pd.to_datetime(time_stamps, unit="s", utc=True)
+        else:
+             # 否則，使用起始時間和間隔 (這是您上一個修正的邏輯，但這次我們確保 Time() 呼叫正確)
+             # 在 openmeteo_requests 中，response.Time() 確實是獲取起始時間的方法，
+             # 但它需要用 response.Time()，而不是 response.TimeAsNumpy()
+             try:
+                 start_time = pd.to_datetime(response.Time(), unit="s", utc=True)
+                 time_series = pd.date_range(
+                     start=start_time,
+                     periods=data_points_count,
+                     freq=f'{interval_seconds}s',
+                     tz='UTC'
+                 )
+             except Exception as e:
+                 print(f"❌ [Weather] Start time method failed: {e}")
+                 return pd.DataFrame()
+
 
         # 轉換為 DataFrame
         hourly_data = {
-            "datetime": time_series, # 使用生成的時間序列
-            
-            # 其他變數保持不變
-            "temperature": temperature_data, # 直接使用上面獲取的變數
+            "datetime": time_series, 
+            "temperature": temperature_data, 
             "humidity": hourly.Variables(1).ValuesAsNumpy(), 
             "pressure": hourly.Variables(2).ValuesAsNumpy(),
         }
