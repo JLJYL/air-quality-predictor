@@ -1,4 +1,4 @@
-# app.py - Open-Meteo Weather Integration Revision
+# app.py - Open-Meteo Weather Integration Revision (with Traceback Debugging)
 
 # =================================================================
 # Import all necessary libraries 
@@ -13,6 +13,7 @@ import warnings
 import numpy as np
 import xgboost as xgb
 import json
+import traceback # <-- Added for debugging
 from datetime import timedelta, timezone
 from flask import Flask, render_template, request
 # 引入 Open-Meteo 相關函式庫
@@ -104,7 +105,7 @@ def aqi_from_conc(pollutant, conc):
     return np.nan
 
 def calculate_aqi(row):
-    """計算觀測數據的整體 AQI，取所有污染物 AQI 的最大值"""
+    """計算觀測數據的整體 AQI,取所有污染物 AQI 的最大值"""
     aqis = []
     
     for param in POLLUTANT_TARGETS:
@@ -180,6 +181,7 @@ def fetch_location_list(country_id=DEFAULT_COUNTRY):
 
     except Exception as e:
         print(f"❌ [Location] Error fetching locations: {e}")
+        traceback.print_exc()
 
 @retry(tries=3, delay=2, backoff=2, exceptions=(requests.exceptions.Timeout, requests.exceptions.HTTPError))
 def fetch_latest_observation(location_id):
@@ -195,8 +197,9 @@ def fetch_latest_observation(location_id):
         response.raise_for_status()
         data = response.json()
         
-        # 處理沒有結果或結果中沒有測量的空數據
+        # 檢查是否有結果或測量數據
         if not data.get('results') or not data['results'][0].get('measurements'):
+            print(f"⚠️ [OpenAQ] No measurements found for location ID: {location_id}.")
             return pd.DataFrame()
 
         # 扁平化結果
@@ -236,7 +239,10 @@ def fetch_latest_observation(location_id):
         return latest_row.reset_index(drop=True)
 
     except Exception as e:
-        print(f"❌ [OpenAQ] Error fetching latest observation: {e}")
+        print(f"❌ [OpenAQ] 處理數據失敗: {e}")
+        print("--- OpenAQ Traceback Start ---")
+        traceback.print_exc()
+        print("--- OpenAQ Traceback End ---")
         return pd.DataFrame()
 
 
@@ -300,6 +306,9 @@ def fetch_weather_forecast(lat, lon, start_datetime):
         
     except Exception as e:
         print(f"❌ [OpenMeteo] 取得天氣預報失敗: {e}")
+        print("--- Weather Traceback Start ---")
+        traceback.print_exc()
+        print("--- Weather Traceback End ---")
         return pd.DataFrame()
 
 
@@ -445,7 +454,7 @@ def predict_future_multi(df, models, feature_cols):
         
         for param in POLLUTANT_TARGETS:
             # 填充 t 時刻的 1-hour lag (使用 t-1 時刻的 value)
-            lag_1h_col = f'{param}_lag_1h'
+            lag_1h_col = f'{param}_lag_{1}h'
             value_col = f'{param}_value'
             if lag_1h_col in df.columns and value_col in df.columns:
                  # 使用 .loc 進行精確賦值
@@ -455,9 +464,6 @@ def predict_future_multi(df, models, feature_cols):
         if 'aqi_lag_1h' in df.columns and 'aqi' in df.columns:
              df.loc[current_idx, 'aqi_lag_1h'] = df.loc[prev_idx, 'aqi']
 
-        # 確保時間特徵已經存在
-        # 由於 get_forecast_input_template 已經在 t=0 到 t=24 都生成了時間特徵，這裡不需要重新計算
-        
         # 獲取要傳入模型的特徵
         X_test = df.loc[current_idx, feature_cols].to_frame().T
         
@@ -564,6 +570,8 @@ def index():
              CURRENT_OBSERVATION_CATEGORY, CURRENT_OBSERVATION_COLOR = get_aqi_category(CURRENT_OBSERVATION_AQI)
         
         print(f"✅ [Observation] Latest AQI: {CURRENT_OBSERVATION_AQI} at {CURRENT_OBSERVATION_TIME}")
+    else:
+        print(f"⚠️ [Observation] OpenAQ returned empty data for location {selected_location_id}. Continuing in fallback mode.")
 
 
     # ========== 3️⃣ 獲取未來天氣預報 (使用 Timestamp 物件) ==========
@@ -575,6 +583,8 @@ def index():
             TARGET_LON, 
             CURRENT_OBSERVATION_DT # 直接傳遞 Timestamp 物件
         )
+    else:
+        print("⚠️ [Weather] Skipping weather fetch because CURRENT_OBSERVATION_DT is None.")
     
     
     # ========== 4️⃣ 檢查模型和數據完整性 ==========
@@ -652,6 +662,9 @@ def index():
                 print("✅ [Request] Prediction successful!")
         except Exception as e:
             print(f"❌ [Predict] Error during prediction logic: {e}")
+            print("--- Prediction Traceback Start ---")
+            traceback.print_exc()
+            print("--- Prediction Traceback End ---")
 
     if is_fallback_mode:
         print("🚨 [Fallback Mode] Showing latest observed AQI only.")
