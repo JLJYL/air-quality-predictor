@@ -1,4 +1,4 @@
-# app.py - Open-Meteo Weather Integration Revision (Fixed)
+# app.py - Open-Meteo Weather Integration Revision
 
 # =================================================================
 # Import all necessary libraries 
@@ -104,7 +104,7 @@ def get_location_meta(location_id: int):
         return None
 
 # =================================================================
-# V3 API 穩定定位函式 (修正 422 錯誤)
+# V3 API 穩健定位函式 (修正 422 錯誤)
 # =================================================================
 def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
     """
@@ -126,7 +126,7 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
             print("🚨 [Nearest] No stations found within 25km.")
             return None, None, None, None
 
-        # 直接使用第一個(最近)站，無論有沒有 PM2.5
+        # 直接使用第一個（最近）站，無論有沒有 PM2.5
         nearest = results[0]
         loc_id = int(nearest["id"])
         loc_name = nearest["name"]
@@ -155,7 +155,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
             return pd.DataFrame()
         r.raise_for_status()
         results = r.json().get("results", [])
-        print("\n🌐 [DEBUG] Raw stations returned by OpenAQ:")
+        print("\n🌍 [DEBUG] Raw stations returned by OpenAQ:")
         print(json.dumps(results, indent=2, ensure_ascii=False))
 
         if not results:
@@ -291,8 +291,6 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         df = df[df['datetime'] >= start_time].head(HOURS_TO_PREDICT).copy()
         
         print(f"✅ [Weather] Fetched {len(df)} hours of weather forecast.")
-        print(f"🌡️ Temperature range: {df['temperature'].min():.1f}°C ~ {df['temperature'].max():.1f}°C")
-        print(f"💧 Humidity range: {df['humidity'].min():.0f}% ~ {df['humidity'].max():.0f}%")
         
         return df
         
@@ -462,7 +460,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     """
     predictions = []
 
-    # pandas 顯示設定
+    # pandas 印出設定
     pd.set_option('display.max_columns', 10)
     pd.set_option('display.width', 140)
 
@@ -513,23 +511,26 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
             pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-            # ⭐️ 核心變動：使用 Open-Meteo 預報數據（先更新 current_data_dict 再複製到 pred_features）
+            # ⭐️ 核心變動：使用 Open-Meteo 預報數據
             if has_weather:
-                weather_key = future_time.replace(minute=0, second=0, microsecond=0)
+                weather_key = future_time.replace(minute=0, second=0, microsecond=0) # 確保時間匹配整點
                 
                 if weather_key in weather_dict:
                     forecast = weather_dict[weather_key]
                     for w_col in weather_feature_names:
                         if w_col in forecast:
-                            # 先更新 current_data_dict，然後才更新 pred_features
-                            current_data_dict[w_col] = forecast[w_col]
                             pred_features[w_col] = forecast[w_col]
-                    if h < 3:  # 只在前3小時顯示詳細信息
-                        print(f"✅ [Weather] Hour +{h+1}: T={current_data_dict.get('temperature', 'N/A'):.1f}°C, H={current_data_dict.get('humidity', 'N/A'):.0f}%, P={current_data_dict.get('pressure', 'N/A'):.1f}hPa")
+                            # 為了下一輪預測的滯後特徵/最後已知值，更新 current_data_dict
+                            current_data_dict[w_col] = forecast[w_col] 
                 else:
                     print(f"⚠️ [Weather] Forecast missing for {future_time}. Using last known value.")
                     for w_col in weather_feature_names:
-                        pred_features[w_col] = current_data_dict.get(w_col, np.nan)
+                         # 使用 current_data_dict 中最新的天氣值作為預測，以避免 NaN
+                        pred_features[w_col] = current_data_dict.get(w_col, np.nan) 
+
+            # -----------------------------------------------
+            # 移除 np.random.seed() 和隨機模擬邏輯
+            # -----------------------------------------------
 
             current_prediction_row = {'datetime': future_time}
             new_pollutant_values = {}
@@ -548,6 +549,10 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     continue
 
                 pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
+
+                # 印出資料內容（前 10 欄）
+                print(f"\n📦 [Model Input for {param.upper()} — Hour +{h+1}] (feature count = {len(feature_cols)})")
+                print(pd.DataFrame(pred_input, columns=feature_cols).iloc[:, :10])
 
                 pred = model.predict(pred_input)[0]
                 pred = max(0, pred)
@@ -576,7 +581,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                     current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
 
-        # 總結顯示結果
+        # 總結印出結果
         print(f"\n✅ [Summary] 模型共收到 {total_predictions} 筆輸入資料，"
               f"每筆包含 {len(feature_cols)} 個特徵。"
               f"→ 總特徵傳遞量 = {total_predictions * len(feature_cols):,} 數值")
@@ -655,7 +660,7 @@ def index():
     global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
     global current_location_id, current_location_name
     global TARGET_LAT, TARGET_LON
-    station_lat, station_lon = TARGET_LAT, TARGET_LON # 預設使用TARGET,如果找到測站則更新
+    station_lat, station_lon = TARGET_LAT, TARGET_LON # 預設使用TARGET，如果找到測站則更新
 
     # ========== 1️⃣ 從網址參數抓座標 ==========
     lat_param = request.args.get('lat', type=float)
@@ -674,7 +679,7 @@ def index():
         current_location_name = loc_name
         station_lat, station_lon = lat_found, lon_found # 使用測站的精確坐標來獲取天氣
         print(f"✅ [Nearest Station Found] {loc_name} (ID: {loc_id})")
-        print(f"📍 Station Coordinates: {station_lat}, {station_lon}")
+        print(f"📍 Station Coordinates : {station_lat}, {station_lon}")
     else:
         print("⚠️ [Nearest] No valid station found, fallback to default Kaohsiung")
         current_location_id = DEFAULT_LOCATION_ID
@@ -776,8 +781,7 @@ def index():
         aqi_predictions=aqi_predictions,
         city_name=current_location_name,
         current_obs_time=CURRENT_OBSERVATION_TIME,
-        is_fallback=is_fallback_mode,
-        station_coords=f"{station_lat}, {station_lon}"  # 顯示實際使用的測站座標
+        is_fallback=is_fallback_mode
     )
 
 
