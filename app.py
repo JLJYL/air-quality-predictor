@@ -1,4 +1,4 @@
-# app.py - Open-Meteo Weather Integration Revision
+# app.py - Open-Meteo Weather Integration Revision with Full Historical Feature Engineering
 
 # =================================================================
 # Import all necessary libraries 
@@ -53,7 +53,7 @@ TOL_MINUTES_FALLBACK = 180
 # Global Variables (Mutable)
 # =================================================================
 TRAINED_MODELS = {} 
-LAST_OBSERVATION = None 
+LAST_OBSERVATION = None # NOTE: This will now only store the loaded features from meta, mainly for feature list reference.
 FEATURE_COLUMNS = []
 POLLUTANT_PARAMS = [] 
 HOURS_TO_PREDICT = 24
@@ -156,7 +156,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
         r.raise_for_status()
         results = r.json().get("results", [])
         print("\n🌍 [DEBUG] Raw stations returned by OpenAQ:")
-        print(json.dumps(results, indent=2, ensure_ascii=False))
+        # print(json.dumps(results, indent=2, ensure_ascii=False)) # Commented out for cleaner output
 
         if not results:
             return pd.DataFrame()
@@ -185,6 +185,7 @@ def get_location_latest_df(location_id: int) -> pd.DataFrame:
 
         return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
     except Exception as e:
+        print(f"❌ [Latest] Failed to fetch latest data: {e}")
         return pd.DataFrame()
 
 def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
@@ -236,7 +237,72 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 
 
 # =================================================================
-# Open-Meteo Weather Fetching (新增)
+# OpenAQ V3 穩健歷史數據獲取 (新增 - 核心修正)
+# =================================================================
+def get_location_history_df(location_id: int, hours_back: int = 26) -> pd.DataFrame:
+    """
+    Fetches historical hourly air quality data for the last 'hours_back' hours (Uses V3).
+    Returns a DataFrame with 'datetime' (UTC) and pollutant columns.
+    """
+    # 設置時間範圍：從現在往前回溯
+    end_time = datetime.datetime.now(timezone.utc)
+    start_time = end_time - timedelta(hours=hours_back)
+    
+    # OpenAQ API V3 的 time_from 和 time_to 參數
+    time_from_iso = start_time.isoformat().replace('+00:00', 'Z')
+    time_to_iso = end_time.isoformat().replace('+00:00', 'Z')
+    
+    params = {
+        "time_from": time_from_iso,
+        "time_to": time_to_iso,
+        "location_id": location_id,
+        "parameter_id": [PARAM_IDS[p] for p in POLLUTANT_TARGETS if p in PARAM_IDS], # 限制為目標污染物
+        "limit": 10000, # 獲取足夠多的點
+        "sort": "desc"
+    }
+
+    try:
+        r = requests.get(f"{BASE}/measurements", headers=HEADERS, params=params, timeout=20)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+
+        if not results:
+            print(f"🚨 [History] No historical measurements found for location ID {location_id}.")
+            return pd.DataFrame()
+
+        df = pd.json_normalize(results)
+
+        # 標準化時間和數值
+        df["datetime"] = pd.to_datetime(df["datetime.utc"], errors="coerce", utc=True)
+        df["parameter"] = df["parameter.name"].str.lower()
+        df = df.rename(columns={"value": "value_raw"})
+        
+        # 僅保留目標污染物，並按時間和參數去重複
+        df = df[df["parameter"].isin(POLLUTANT_TARGETS)].sort_values(
+            ['datetime', 'parameter'], ascending=False
+        ).drop_duplicates(subset=['datetime', 'parameter'], keep='first')
+
+        # 轉為寬表格，每行一個時間點
+        history_wide = df.pivot_table(
+            index='datetime', columns='parameter', values='value_raw'
+        ).reset_index()
+
+        # 計算歷史 AQI
+        if not history_wide.empty:
+            history_wide['aqi'] = history_wide.apply(
+                lambda row: calculate_aqi(row, POLLUTANT_TARGETS, is_pred=False), axis=1
+            )
+
+        print(f"✅ [History] Fetched {len(history_wide)} historical hours.")
+        return history_wide.sort_values('datetime')
+
+    except Exception as e:
+        print(f"❌ [History] Failed to fetch historical data: {e}")
+        return pd.DataFrame()
+
+
+# =================================================================
+# Open-Meteo Weather Fetching
 # =================================================================
 # 設置快取和重試
 cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
@@ -449,6 +515,79 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
     return np.max(sub_indices)
 
+# -----------------------------------------------------------------
+# 特徵工程生成器 (新增 - 核心修正)
+# -----------------------------------------------------------------
+def generate_features_for_prediction(history_df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
+    """
+    Takes historical data (at least 24 hours) and generates the single-row 
+    DataFrame with all required lag and rolling features for the prediction start point.
+    """
+    if history_df.empty:
+        return pd.DataFrame()
+    
+    # 確保 history_df 的 datetime 是 UTC-aware
+    history_df['datetime'] = pd.to_datetime(history_df['datetime']).dt.tz_localize('UTC')
+
+    # 1. 處理滯後特徵 (Lagged Features)
+    df_features = history_df.set_index('datetime').copy()
+    pollutant_plus_aqi = POLLUTANT_TARGETS + ['aqi']
+    
+    for param in pollutant_plus_aqi:
+        for lag in LAG_HOURS:
+            lag_col = f'{param}_lag_{lag}h'
+            if lag_col in feature_cols and param in df_features.columns:
+                # 簡單地從過去 N 小時的觀測中取值
+                # 注意：這裡的 shift 是負數，因為我們要用當前行來預測下一行（但這裡我們是為最後一行做特徵準備）
+                # 在預測模式下，我們只需要最後一個觀測點的滯後特徵
+                df_features[lag_col] = df_features[param].shift(lag)
+
+
+    # 2. 處理滾動特徵 (Rolling Features)
+    for param in pollutant_plus_aqi:
+        for window in ROLLING_WINDOWS:
+            roll_col_mean = f'{param}_rolling_{window}h_mean'
+            roll_col_std = f'{param}_rolling_{window}h_std'
+            
+            if param in df_features.columns:
+                if roll_col_mean in feature_cols:
+                    # 滾動視窗的平均值 (shift(1)確保我們只使用過去的數據)
+                    df_features[roll_col_mean] = df_features[param].rolling(window=window, min_periods=1).mean().shift(1)
+                
+                if roll_col_std in feature_cols:
+                    # 滾動視窗的標準差
+                    df_features[roll_col_std] = df_features[param].rolling(window=window, min_periods=1).std().shift(1)
+
+    # 3. 提取最後一個觀測點的特徵
+    last_obs_row = df_features.iloc[-1].copy().to_frame().T.reset_index(names=['datetime'])
+    
+    # 處理時間特徵 (只對最後一筆觀測點生成)
+    last_obs_row['hour'] = last_obs_row['datetime'].dt.hour
+    last_obs_row['day_of_week'] = last_obs_row['datetime'].dt.dayofweek
+    last_obs_row['month'] = last_obs_row['datetime'].dt.month
+    last_obs_row['day_of_year'] = last_obs_row['datetime'].dt.dayofyear.astype(int)
+    last_obs_row['is_weekend'] = last_obs_row['day_of_week'].apply(lambda x: int(x in [5, 6]))
+    
+    # 循環時間特徵
+    last_obs_row['hour_sin'] = np.sin(2 * np.pi * last_obs_row['hour'] / 24)
+    last_obs_row['hour_cos'] = np.cos(2 * np.pi * last_obs_row['hour'] / 24)
+    last_obs_row['day_sin'] = np.sin(2 * np.pi * last_obs_row['day_of_year'] / 365)
+    last_obs_row['day_cos'] = np.cos(2 * np.pi * last_obs_row['day_of_year'] / 365)
+    
+    # 選擇所有模型所需的特徵
+    final_input_df = last_obs_row[feature_cols + ['datetime']].copy()
+    
+    # 簡易填充：用前一個有效值填充任何剩餘的 NaN (主要針對剛開始時的滾動/滯後特徵)
+    # 並用 0 填充最前端的 NaN
+    final_input_df = final_input_df.fillna(method='ffill', axis=1).fillna(0)
+    
+    # 驗證最重要的滯後特徵是否是 0 (如果歷史數據不足24小時，可能會是0)
+    # print("\n[DEBUG] Feature Input - Lag/Rolling Check:")
+    # print(final_input_df.iloc[0].filter(regex='(lag_|rolling_)').head(10).to_string())
+
+    print(f"✅ [Feature Eng] Generated 1 observation row with {len(final_input_df.columns) - 1} features.")
+    return final_input_df
+
 
 # =================================================================
 # Prediction Function (使用 Open-Meteo 數據取代模擬)
@@ -465,20 +604,21 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     pd.set_option('display.width', 140)
 
     # 確保 datetime 是 tz-aware (UTC)
-    last_data['datetime'] = pd.to_datetime(last_data['datetime'])
-    if last_data['datetime'].dt.tz is None:
-        last_data['datetime'] = last_data['datetime'].dt.tz_localize('UTC')
-    else:
-        last_data['datetime'] = last_data['datetime'].dt.tz_convert('UTC')
+    last_data['datetime'] = pd.to_datetime(last_data['datetime']).dt.tz_convert('UTC')
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    # 初始化特徵字典
+    # 初始化特徵字典 (注意：這裡的 last_data 已經包含了正確的滯後/滾動特徵)
     current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
-                             if col in last_data.columns and not last_data[col].empty 
-                             else np.nan 
-                             for col in feature_cols} 
+                              if col in last_data.columns and not last_data[col].empty 
+                              else np.nan 
+                              for col in feature_cols} 
 
+    # 將當前觀測值 (非滯後) 也放入字典，以便在下一輪遞迴更新滯後特徵
+    for p in pollutant_params + ['aqi', 'temperature', 'humidity', 'pressure']:
+        if p in last_data.columns and not last_data[p].empty:
+             current_data_dict[p] = last_data[p].iloc[0]
+             
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
     has_weather = bool(weather_feature_names)
@@ -523,36 +663,37 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                             # 為了下一輪預測的滯後特徵/最後已知值，更新 current_data_dict
                             current_data_dict[w_col] = forecast[w_col] 
                 else:
+                    # ⚠️ 預報缺失：使用上一個時間點的預測值（即 current_data_dict 中最新的天氣值）
                     print(f"⚠️ [Weather] Forecast missing for {future_time}. Using last known value.")
                     for w_col in weather_feature_names:
-                         # 使用 current_data_dict 中最新的天氣值作為預測，以避免 NaN
-                        pred_features[w_col] = current_data_dict.get(w_col, np.nan) 
-
+                         pred_features[w_col] = current_data_dict.get(w_col, np.nan) 
+                         
             # -----------------------------------------------
-            # 移除 np.random.seed() 和隨機模擬邏輯
-            # -----------------------------------------------
-
             current_prediction_row = {'datetime': future_time}
             new_pollutant_values = {}
-
+            predicted_aqi = np.nan
+            
             # 預測每個污染物
             for param in pollutant_params:
                 if param not in models:
-                    print(f"⚠️ 模型 {param} 不存在，跳過。")
                     continue
 
                 model = models[param]
+                
+                # 從 pred_features 中提取模型所需的特徵
                 pred_input_list = [pred_features.get(col) for col in feature_cols]
-                # 確保特徵數量一致
-                if len(pred_input_list) != len(feature_cols):
-                    print(f"❌ [Predict] 特徵數量不匹配，跳過 {param} 預測。")
-                    continue
+                
+                # 檢查是否有任何 NaN 或 None 的關鍵特徵
+                if any(pd.isna(x) for x in pred_input_list):
+                     print(f"❌ [Predict] Input feature missing or NaN for {param} at Hour +{h+1}. Skipping prediction.")
+                     new_pollutant_values[param] = np.nan
+                     continue
 
                 pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
 
-                # 印出資料內容（前 10 欄）
-                print(f"\n📦 [Model Input for {param.upper()} — Hour +{h+1}] (feature count = {len(feature_cols)})")
-                print(pd.DataFrame(pred_input, columns=feature_cols).iloc[:, :10])
+                # # 印出資料內容 (前 10 欄) - 註釋掉以減少輸出
+                # print(f"\n📦 [Model Input for {param.upper()} — Hour +{h+1}] (feature count = {len(feature_cols)})")
+                # print(pd.DataFrame(pred_input, columns=feature_cols).iloc[:, :10])
 
                 pred = model.predict(pred_input)[0]
                 pred = max(0, pred)
@@ -562,13 +703,18 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 total_predictions += 1
 
             # 計算 AQI
-            predicted_aqi = calculate_aqi(pd.Series(current_prediction_row), pollutant_params, is_pred=True)
+            if new_pollutant_values:
+                predicted_aqi = calculate_aqi(pd.Series(current_prediction_row), pollutant_params, is_pred=True)
+            
             current_prediction_row['aqi_pred'] = predicted_aqi
             new_pollutant_values['aqi'] = predicted_aqi
             predictions.append(current_prediction_row)
 
-            # 更新滯後特徵
+            # 更新滯後特徵和滾動特徵 (遞迴核心)
             for param in pollutant_params + ['aqi']:
+                if pd.isna(new_pollutant_values.get(param)): continue
+                
+                # 1. 更新滯後特徵：將 1h 的預測值設為當前 param 的最新值
                 for i in range(len(LAG_HOURS) - 1, 0, -1):
                     lag_current = LAG_HOURS[i]
                     lag_prev = LAG_HOURS[i-1]
@@ -576,10 +722,30 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     lag_prev_col = f'{param}_lag_{lag_prev}h'
 
                     if lag_current_col in current_data_dict and lag_prev_col in current_data_dict:
-                        current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
+                         current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
 
-                if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
+                if f'{param}_lag_1h' in current_data_dict:
                     current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+                    
+                # 2. 更新滾動特徵
+                for window in ROLLING_WINDOWS:
+                    roll_mean_col = f'{param}_rolling_{window}h_mean'
+                    roll_std_col = f'{param}_rolling_{window}h_std'
+                    
+                    # 滾動視窗邏輯需要歷史值，這裡使用簡易遞迴更新：
+                    # (這是一個簡化，準確的滾動需要維護一個長度為 24 的序列，但這個簡化通常能工作)
+                    
+                    if roll_mean_col in current_data_dict:
+                        # 使用 EWMA 模擬滾動平均更新
+                        alpha = 2 / (window + 1)
+                        old_mean = current_data_dict[roll_mean_col]
+                        new_value = new_pollutant_values[param]
+                        
+                        # 這是下一輪預測的滾動平均
+                        current_data_dict[roll_mean_col] = (1 - alpha) * old_mean + alpha * new_value
+                        
+                    # 滾動標準差的遞迴更新非常複雜，這裡暫時保持不變 (使用前一時刻的值)
+                    # 如果模型很依賴標準差，則需要更複雜的序列維護
 
         # 總結印出結果
         print(f"\n✅ [Summary] 模型共收到 {total_predictions} 筆輸入資料，"
@@ -612,7 +778,7 @@ def load_models_and_metadata():
         FEATURE_COLUMNS = metadata.get('feature_columns', [])
         
         if 'last_observation_json' in metadata:
-            # We rely on this to provide the initial lagged features
+            # 這裡只是載入它來獲取欄位名稱和順序，實際數值將被新地點的數據取代
             LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
             
 
@@ -629,7 +795,7 @@ def load_models_and_metadata():
                 params_to_remove.append(param)
         
         for param in params_to_remove:
-             POLLUTANT_PARAMS.remove(param)
+              POLLUTANT_PARAMS.remove(param)
 
         if TRAINED_MODELS:
             print(f"✅ [Load] Successfully loaded {len(TRAINED_MODELS)} models.")
@@ -662,6 +828,10 @@ def index():
     global TARGET_LAT, TARGET_LON
     station_lat, station_lon = TARGET_LAT, TARGET_LON # 預設使用TARGET，如果找到測站則更新
 
+    # pandas 印出設定
+    pd.set_option('display.max_columns', 15)
+    pd.set_option('display.width', 180)
+
     # ========== 1️⃣ 從網址參數抓座標 ==========
     lat_param = request.args.get('lat', type=float)
     lon_param = request.args.get('lon', type=float)
@@ -686,19 +856,24 @@ def index():
         current_location_name = DEFAULT_LOCATION_NAME
         # 如果找不到測站，使用 TARGET 坐標來獲取天氣
 
-    # ⭐️ 新增：獲取天氣預報
+    # ⭐️ 新增：獲取天氣預報 (使用測站或目標座標)
     weather_forecast_df = get_weather_forecast(station_lat, station_lon)
 
-    # ========== 3️⃣ 取得觀測資料 ==========
+    # ========== 3️⃣ 取得觀測資料 (修正：新增歷史資料獲取) ==========
+    # 獲取單一最新觀測點
     current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
+    # 獲取歷史趨勢數據 (用於計算滯後特徵)
+    historical_df = get_location_history_df(current_location_id, hours_back=26) 
+
 
     if not current_observation_raw.empty:
-        print("\n📊 [OpenAQ Raw Observation DataFrame]")
+        print("\n📊 [OpenAQ Latest Observation DataFrame]")
         print(current_observation_raw.to_string(index=False))
     else:
-        print("🚨 [OpenAQ] No data returned from API.")
+        print("🚨 [OpenAQ] No LATEST data returned from API.")
 
-    # ========== 4️⃣ 取得當前 AQI ==========
+
+    # ========== 4️⃣ 取得當前 AQI (保持不變) ==========
     if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
         obs_aqi_val = current_observation_raw['aqi'].iloc[0]
         obs_time_val = current_observation_raw['datetime'].iloc[0]
@@ -711,27 +886,52 @@ def index():
         CURRENT_OBSERVATION_AQI = "N/A"
         CURRENT_OBSERVATION_TIME = "N/A"
 
-    # ========== 5️⃣ 建立預測或回退顯示 ==========
+    # ========== 5️⃣ 建立預測起點 (替換為完整修正邏輯) ==========
     observation_for_prediction = None
     is_valid_for_prediction = False
     is_fallback_mode = True
 
-    if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-        observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
-        latest_row = current_observation_raw.iloc[0]
-        dt_val = latest_row['datetime']
-        if pd.to_datetime(dt_val).tz is not None:
-            dt_val = pd.to_datetime(dt_val).tz_convert(None)
-        observation_for_prediction['datetime'] = dt_val
+    # 檢查是否有模型，有最新觀測，有歷史數據
+    if TRAINED_MODELS and not current_observation_raw.empty and not historical_df.empty:
+        try:
+            # 1. 用歷史數據生成包含所有滯後特徵的單行 DataFrame
+            obs_with_features = generate_features_for_prediction(historical_df, FEATURE_COLUMNS)
+            
+            # 2. 如果生成成功，則使用它作為預測起點
+            if not obs_with_features.empty:
+                
+                # 確保最新的觀測值覆蓋歷史計算的最新點（尤其是在 API 延遲時）
+                latest_row = current_observation_raw.iloc[0].to_dict()
+                
+                # 覆蓋污染物和 AQI
+                for col in POLLUTANT_TARGETS + ['aqi']:
+                    if col in latest_row and col in obs_with_features.columns:
+                         obs_with_features[col] = latest_row[col]
+                         
+                # 確保將天氣數據的最新觀測值也放入 (模型訓練時可能使用了觀測氣象)
+                if not weather_forecast_df.empty and 'temperature' in obs_with_features.columns:
+                     latest_weather = weather_forecast_df.iloc[0].to_dict()
+                     for w_col in ['temperature', 'humidity', 'pressure']:
+                         if w_col in obs_with_features.columns and w_col in latest_weather:
+                              obs_with_features[w_col] = latest_weather.get(w_col, obs_with_features[w_col].iloc[0]) # 使用預報的第一小時值
+                
+                observation_for_prediction = obs_with_features
+                
+                # 最終檢查所有必要欄位是否存在
+                missing_features = [col for col in FEATURE_COLUMNS if col not in observation_for_prediction.columns]
+                if not missing_features:
+                    is_valid_for_prediction = True
+                    print("\n✅ [Feature Input] Prediction input row successfully generated:")
+                    # 顯示污染物當前值和部分滯後特徵
+                    cols_to_print = POLLUTANT_TARGETS + ['aqi', 'pm25_lag_1h', 'pm25_rolling_6h_mean', 'temperature', 'humidity']
+                    print(observation_for_prediction.iloc[0][observation_for_prediction.columns.intersection(cols_to_print)].to_string())
+                else:
+                    print(f"❌ [Feature Input] Missing critical features for prediction: {missing_features}")
 
-        for col in latest_row.index:
-            if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
-                if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
-                    observation_for_prediction[col] = latest_row[col]
+        except Exception as e:
+            print(f"❌ [Feature Input] Error during feature generation: {e}")
 
-        if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
-            is_valid_for_prediction = True
-
+    # --- 預測區塊 ---
     max_aqi = CURRENT_OBSERVATION_AQI
     aqi_predictions = []
 
@@ -740,11 +940,11 @@ def index():
             # ⭐️ 傳遞天氣預報數據
             future_predictions = predict_future_multi(
                 TRAINED_MODELS,
-                observation_for_prediction,
+                observation_for_prediction, # 使用新的、有正確滯後特徵的數據
                 FEATURE_COLUMNS,
                 POLLUTANT_PARAMS,
                 hours=HOURS_TO_PREDICT,
-                weather_df=weather_forecast_df # 傳遞 Open-Meteo 預報
+                weather_df=weather_forecast_df
             )
             
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
@@ -763,10 +963,10 @@ def index():
                 is_fallback_mode = False
                 print("✅ [Request] Prediction successful!")
         except Exception as e:
-            print(f"❌ [Predict] Error: {e}")
+            print(f"❌ [Predict] Error during main prediction process: {e}")
 
     if is_fallback_mode:
-        print("🚨 [Fallback Mode] Showing latest observed AQI only.")
+        print("🚨 [Fallback Mode] Prediction failed or data insufficient. Showing latest observed AQI only.")
         if CURRENT_OBSERVATION_AQI != "N/A":
             aqi_predictions = [{
                 'time': CURRENT_OBSERVATION_TIME,
