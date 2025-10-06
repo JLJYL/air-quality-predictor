@@ -25,45 +25,12 @@
       animation: spin 1s linear infinite;
     }
     @keyframes spin { 100% { transform: rotate(360deg); } }
-    
-    /* 新增：調試資訊顯示區 */
-    #debugInfo {
-      background: #1f2937;
-      color: #10b981;
-      padding: 1rem;
-      border-radius: 8px;
-      font-family: monospace;
-      font-size: 0.875rem;
-      max-height: 300px;
-      overflow-y: auto;
-      margin-bottom: 1rem;
-    }
-    .debug-line { margin: 0.25rem 0; }
-    .debug-error { color: #ef4444; }
-    .debug-success { color: #10b981; }
-    .debug-warning { color: #f59e0b; }
   </style>
 
   <script>
-  // 全局調試函數
-  function debugLog(message, type = 'info') {
-    console.log(message);
-    const debugDiv = document.getElementById('debugInfo');
-    if (debugDiv) {
-      const line = document.createElement('div');
-      line.className = `debug-line debug-${type}`;
-      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-      debugDiv.appendChild(line);
-      debugDiv.scrollTop = debugDiv.scrollHeight;
-    }
-  }
-
   document.addEventListener("DOMContentLoaded", function () {
-      debugLog('頁面載入完成', 'success');
-      
       const params = new URLSearchParams(window.location.search);
       if (params.has("lat") && params.has("lon")) {
-          debugLog(`使用 URL 座標: lat=${params.get('lat')}, lon=${params.get('lon')}`, 'info');
           document.getElementById("loadingOverlay").style.display = "none";
           document.getElementById("content").style.display = "block";
           return;
@@ -75,13 +42,11 @@
 
       if (navigator.geolocation) {
           loadingText.innerText = "正在取得您的位置...";
-          debugLog('開始定位...', 'info');
           
           navigator.geolocation.getCurrentPosition(
               (position) => {
                   const lat = position.coords.latitude.toFixed(6);
                   const lon = position.coords.longitude.toFixed(6);
-                  debugLog(`定位成功: lat=${lat}, lon=${lon}`, 'success');
                   loadingText.innerText = "定位完成，正在載入空氣品質資料...";
                   const baseUrl = window.location.origin + window.location.pathname;
                   setTimeout(() => {
@@ -89,7 +54,6 @@
                   }, 800);
               },
               (error) => {
-                  debugLog(`定位失敗: ${error.message}`, 'error');
                   loadingText.innerText = "無法取得定位，將使用預設高雄資料...";
                   setTimeout(() => { 
                       overlay.style.display = "none"; 
@@ -99,7 +63,6 @@
               { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
           );
       } else {
-          debugLog('瀏覽器不支援定位', 'warning');
           loadingText.innerText = "您的瀏覽器不支援定位，使用預設資料";
           setTimeout(() => { 
               overlay.style.display = "none"; 
@@ -119,22 +82,11 @@
 
   <!-- 主內容 -->
   <div class="max-w-6xl mx-auto" style="display:none" id="content">
-      <!-- 🆕 調試資訊區（開發時顯示，正式上線可隱藏） -->
-      <div class="bg-white rounded-xl shadow-xl p-4 mb-6">
-          <details>
-              <summary class="cursor-pointer font-bold text-gray-700 mb-2">🔍 系統診斷資訊（點擊展開）</summary>
-              <div id="debugInfo" class="mt-2">
-                  <div class="debug-success">系統初始化完成</div>
-              </div>
-          </details>
-      </div>
-
       <header class="text-center mb-10">
           <h2 class="text-4xl font-extrabold text-gray-900 mb-2">
               Air Quality Forecast for {{ city_name }} Station
           </h2>
           <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
-          <!-- 🆕 顯示當前觀測時間 -->
           {% if current_obs_time != "N/A" %}
           <p class="text-sm text-gray-500 mt-1">最近觀測時間: {{ current_obs_time }}</p>
           {% endif %}
@@ -201,7 +153,6 @@
           <div class="relative" style="height: 400px;">
               <canvas id="aqiChart"></canvas>
           </div>
-          <!-- 🆕 無數據提示 -->
           <div id="noDataWarning" style="display: none;" class="text-center py-8">
               <p class="text-gray-500 text-lg">⚠️ 暫無預測數據</p>
               <p class="text-gray-400 text-sm mt-2">可能原因：模型未載入或測站數據不足</p>
@@ -211,21 +162,17 @@
 
   <script>
   window.onload = function() {
-      debugLog('開始載入圖表...', 'info');
       document.getElementById("content").style.display = "block";
 
       let predictions = [];
       try {
           const jsonStr = '{{ aqi_predictions | tojson | safe }}';
-          debugLog(`接收到的 JSON 長度: ${jsonStr.length}`, 'info');
           predictions = JSON.parse(jsonStr);
-          debugLog(`解析成功，預測數量: ${predictions.length}`, 'success');
       } catch (e) { 
-          debugLog(`JSON 解析失敗: ${e.message}`, 'error');
+          console.error('JSON parsing failed:', e);
       }
 
       if (!predictions || predictions.length === 0) {
-          debugLog('無預測數據，顯示警告', 'warning');
           document.getElementById('noDataWarning').style.display = 'block';
           document.getElementById('aqiChart').style.display = 'none';
           return;
@@ -233,8 +180,6 @@
 
       const labels = predictions.map(p => p.time);
       const data = predictions.map(p => (p.aqi === "N/A" ? null : p.aqi));
-      
-      debugLog(`圖表標籤數: ${labels.length}, 數據點數: ${data.filter(d => d !== null).length}`, 'info');
 
       const ctx = document.getElementById('aqiChart').getContext('2d');
       const validData = data.filter(v => v !== null);
@@ -292,9 +237,8 @@
                   }
               }
           });
-          debugLog('圖表繪製成功！', 'success');
       } catch (e) {
-          debugLog(`圖表繪製失敗: ${e.message}`, 'error');
+          console.error('Chart rendering failed:', e);
       }
   };
   </script>
