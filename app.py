@@ -80,10 +80,10 @@ def get_location_meta(location_id: int):
     except Exception as e:
         return None
 
-# 🔧 修復 1: 改進測站參數檢測邏輯
 def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
     """
-    搜尋最近且數據完整的監測站（修復測站參數檢測）
+    搜尋最近且數據完整的監測站（終極修復版）
+    修復：從 sensors.parameter.name 提取監測項目
     """
     V3_LOCATIONS_URL = f"{BASE}/locations"
     radius_meters = radius_km * 1000
@@ -109,32 +109,22 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         max_params = 0
         
         for idx, station in enumerate(results):
-            # 🔧 修復：檢查多種可能的參數格式
-            parameters = station.get("parameters", [])
+            station_name = station.get("name", "Unknown")
+            distance = station.get("distance", 0)
             
-            # 嘗試多種方式提取參數名稱
+            # ✅ 修復：從 sensors 欄位提取參數
+            sensors = station.get("sensors", [])
             param_names = []
-            for p in parameters:
-                # 嘗試 1: 標準格式
-                if isinstance(p, dict):
-                    name = p.get("name", "").lower()
-                    if name:
-                        param_names.append(name)
-                # 嘗試 2: 直接是字串
-                elif isinstance(p, str):
-                    param_names.append(p.lower())
             
-            # 如果還是沒有參數，嘗試從 sensors 獲取
-            if not param_names and "sensors" in station:
-                sensors = station.get("sensors", [])
-                for s in sensors:
-                    if isinstance(s, dict):
-                        param_name = s.get("parameter", {})
-                        if isinstance(param_name, dict):
-                            name = param_name.get("name", "").lower()
-                            if name:
-                                param_names.append(name)
+            for sensor in sensors:
+                # 提取 sensor.parameter.name
+                parameter = sensor.get("parameter", {})
+                if isinstance(parameter, dict):
+                    param_name = parameter.get("name", "").lower()
+                    if param_name:
+                        param_names.append(param_name)
             
+            # 計算符合目標的參數數量
             param_count = len([p for p in param_names if p in TARGET_PARAMS])
             
             # 檢查最近更新時間
@@ -144,11 +134,12 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
                 last_update_dt = pd.to_datetime(last_update, utc=True)
                 hours_since_update = (pd.Timestamp.now(tz='UTC') - last_update_dt).total_seconds() / 3600
             
-            station_name = station.get("name", "Unknown")
-            distance = station.get("distance", 0)
-            
             print(f"   [{idx+1}] {station_name}: {param_count} 項目, "
                   f"{hours_since_update:.1f}h 前更新, 距離 {distance/1000:.1f}km")
+            
+            # 📊 如果想看詳細的參數列表（調試用）
+            if param_names:
+                print(f"       → 監測項目: {', '.join(set(param_names))}")
             
             # 優先選擇：1) 24小時內有更新 2) 參數最多 3) 距離較近
             if hours_since_update <= 24 and param_count > max_params:
@@ -160,16 +151,28 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         
         # 如果沒有找到 24 小時內更新的，就用距離最近的
         if best_station is None:
-            # 🔧 修復：優先選擇忠明站（台中地區）
+            # 優先選擇忠明站（台中地區特殊處理）
             for station in results:
                 if "忠明" in station.get("name", ""):
                     best_station = station
-                    print("✅ [Nearest] 優先選擇忠明站")
+                    print("✅ [Nearest] 特別選擇台中忠明站")
                     break
             
             if best_station is None:
+                # 選擇有數據的最近測站（排除已停用的）
+                for station in sorted(results, key=lambda s: s.get("distance", 999999)):
+                    last_update = station.get("datetimeLast", {}).get("utc")
+                    if last_update:
+                        last_update_dt = pd.to_datetime(last_update, utc=True)
+                        days_since = (pd.Timestamp.now(tz='UTC') - last_update_dt).days
+                        if days_since < 30:  # 30天內有更新
+                            best_station = station
+                            print(f"⚠️ [Nearest] 選擇距離最近且 {days_since} 天內有更新的測站")
+                            break
+            
+            if best_station is None:
                 best_station = results[0]
-                print("⚠️ [Nearest] 無 24 小時內更新的測站，使用距離最近的測站")
+                print("⚠️ [Nearest] 使用距離最近的測站（可能已停用）")
         
         loc_id = int(best_station["id"])
         loc_name = best_station["name"]
@@ -177,9 +180,20 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         lat_found = coords.get("latitude", lat)
         lon_found = coords.get("longitude", lon)
         distance = best_station.get("distance", 0)
+        
+        # 重新計算這個測站的參數數量（確保準確）
+        sensors = best_station.get("sensors", [])
+        final_param_names = []
+        for sensor in sensors:
+            parameter = sensor.get("parameter", {})
+            if isinstance(parameter, dict):
+                param_name = parameter.get("name", "").lower()
+                if param_name in TARGET_PARAMS:
+                    final_param_names.append(param_name)
 
         print(f"✅ [Nearest] 最終選擇: {loc_name} (ID: {loc_id})")
-        print(f"   監測項目: {max_params} 個, 距離: {distance/1000:.2f}km")
+        print(f"   監測項目: {len(final_param_names)} 個 ({', '.join(final_param_names)})")
+        print(f"   距離: {distance/1000:.2f}km")
         print(f"   座標: ({lat_found}, {lon_found})")
 
         return loc_id, loc_name, lat_found, lon_found
