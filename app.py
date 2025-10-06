@@ -1,4 +1,4 @@
-# app.py - Open-Meteo Weather Integration Revision
+# app.py - Open-Meteo Weather Integration Revision (Final Fix for Index Error)
 
 # =================================================================
 # Import all necessary libraries 
@@ -503,12 +503,19 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    # 🚨 關鍵修正 1：魯棒地獲取單行數據字典 (解決 DataFrame 索引問題)
-    last_data_record = last_data.iloc[0].to_dict()
+    # 🚨 最終且最關鍵的修正點：確保輸入數據是一個單行字典 (防止隱藏的索引問題)
+    if not last_data.empty:
+        # 使用 iloc[0].to_dict() 確保我們只拿到單行的數據，並且是標準 Python dict。
+        last_data_record = last_data.iloc[0].to_dict()
+    else:
+        print("🚨 [Predict] Input 'last_data' is empty. Cannot initialize features.")
+        return pd.DataFrame()
 
-    # 初始化特徵字典：現在從 last_data_record 中提取數據
-    current_data_dict = {col: last_data_record.get(col, np.nan) 
-                             for col in feature_cols} 
+    # 初始化特徵字典：從單行字典中安全地提取數據
+    current_data_dict = {
+        col: last_data_record.get(col, np.nan) 
+        for col in feature_cols
+    } 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
@@ -520,14 +527,20 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         # 確保天氣預報的 datetime 也是 UTC-aware
         weather_df['datetime'] = pd.to_datetime(weather_df['datetime']).dt.tz_convert('UTC')
         
-        # 🚨 關鍵修正：強制移除天氣預報中的重複時間戳記
+        # 🚨 修正 2：強制移除天氣預報中的重複時間戳記
         if weather_df['datetime'].duplicated().any():
             print("⚠️ [Weather] Duplicated forecast times found. Dropping duplicate weather rows.")
             weather_df = weather_df.drop_duplicates(subset=['datetime'], keep='first')
         
-        weather_df = weather_df.set_index('datetime')
-        weather_dict = weather_df.to_dict(orient='index')
-        print(f"✅ [Weather] Weather data loaded for {len(weather_dict)} hours.")
+        # 執行 to_dict(orient='index')
+        try:
+            weather_df = weather_df.set_index('datetime')
+            weather_dict = weather_df.to_dict(orient='index')
+            print(f"✅ [Weather] Weather data loaded for {len(weather_dict)} hours.")
+        except Exception as e:
+            # 如果這裡依然崩潰，則忽略天氣預報，使用空字典
+            print(f"❌ [Weather] Failed to set index or convert to dict: {e}")
+            weather_dict = {}
 
 
     total_predictions = 0
@@ -565,8 +578,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                          # 使用 current_data_dict 中最新的天氣值作為預測，以避免 NaN
                         pred_features[w_col] = current_data_dict.get(w_col, np.nan) 
 
-            # -----------------------------------------------
-            # 移除 np.random.seed() 和隨機模擬邏輯
             # -----------------------------------------------
 
             current_prediction_row = {'datetime': future_time}
@@ -617,6 +628,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
                 if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
                     current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+
 
         # 總結印出結果
         print(f"\n✅ [Summary] 模型共收到 {total_predictions} 筆輸入資料，"
