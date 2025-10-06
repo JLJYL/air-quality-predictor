@@ -25,12 +25,45 @@
       animation: spin 1s linear infinite;
     }
     @keyframes spin { 100% { transform: rotate(360deg); } }
+    
+    /* 新增：調試資訊顯示區 */
+    #debugInfo {
+      background: #1f2937;
+      color: #10b981;
+      padding: 1rem;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 0.875rem;
+      max-height: 300px;
+      overflow-y: auto;
+      margin-bottom: 1rem;
+    }
+    .debug-line { margin: 0.25rem 0; }
+    .debug-error { color: #ef4444; }
+    .debug-success { color: #10b981; }
+    .debug-warning { color: #f59e0b; }
   </style>
 
   <script>
+  // 全局調試函數
+  function debugLog(message, type = 'info') {
+    console.log(message);
+    const debugDiv = document.getElementById('debugInfo');
+    if (debugDiv) {
+      const line = document.createElement('div');
+      line.className = `debug-line debug-${type}`;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      debugDiv.appendChild(line);
+      debugDiv.scrollTop = debugDiv.scrollHeight;
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+      debugLog('頁面載入完成', 'success');
+      
       const params = new URLSearchParams(window.location.search);
       if (params.has("lat") && params.has("lon")) {
+          debugLog(`使用 URL 座標: lat=${params.get('lat')}, lon=${params.get('lon')}`, 'info');
           document.getElementById("loadingOverlay").style.display = "none";
           document.getElementById("content").style.display = "block";
           return;
@@ -42,11 +75,13 @@
 
       if (navigator.geolocation) {
           loadingText.innerText = "正在取得您的位置...";
+          debugLog('開始定位...', 'info');
+          
           navigator.geolocation.getCurrentPosition(
               (position) => {
                   const lat = position.coords.latitude.toFixed(6);
                   const lon = position.coords.longitude.toFixed(6);
-                  console.log(`✅ 取得座標：lat=${lat}, lon=${lon}`);
+                  debugLog(`定位成功: lat=${lat}, lon=${lon}`, 'success');
                   loadingText.innerText = "定位完成，正在載入空氣品質資料...";
                   const baseUrl = window.location.origin + window.location.pathname;
                   setTimeout(() => {
@@ -54,41 +89,66 @@
                   }, 800);
               },
               (error) => {
-                  console.warn("⚠️ 定位失敗：", error);
+                  debugLog(`定位失敗: ${error.message}`, 'error');
                   loadingText.innerText = "無法取得定位，將使用預設高雄資料...";
-                  setTimeout(() => { overlay.style.display = "none"; }, 1500);
+                  setTimeout(() => { 
+                      overlay.style.display = "none"; 
+                      document.getElementById("content").style.display = "block";
+                  }, 1500);
               },
               { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
           );
       } else {
+          debugLog('瀏覽器不支援定位', 'warning');
           loadingText.innerText = "您的瀏覽器不支援定位，使用預設資料";
-          setTimeout(() => { overlay.style.display = "none"; }, 1500);
+          setTimeout(() => { 
+              overlay.style.display = "none"; 
+              document.getElementById("content").style.display = "block";
+          }, 1500);
       }
   });
   </script>
 </head>
 
 <body class="p-8 min-h-screen">
-  <!-- 🌍 Loading 畫面 -->
+  <!-- Loading 畫面 -->
   <div id="loadingOverlay">
       <div class="spinner mb-4"></div>
       <p id="loadingText" class="text-gray-700 text-lg font-medium">正在初始化...</p>
   </div>
 
-  <!-- 🔹 主內容 -->
+  <!-- 主內容 -->
   <div class="max-w-6xl mx-auto" style="display:none" id="content">
+      <!-- 🆕 調試資訊區（開發時顯示，正式上線可隱藏） -->
+      <div class="bg-white rounded-xl shadow-xl p-4 mb-6">
+          <details>
+              <summary class="cursor-pointer font-bold text-gray-700 mb-2">🔍 系統診斷資訊（點擊展開）</summary>
+              <div id="debugInfo" class="mt-2">
+                  <div class="debug-success">系統初始化完成</div>
+              </div>
+          </details>
+      </div>
+
       <header class="text-center mb-10">
           <h2 class="text-4xl font-extrabold text-gray-900 mb-2">
               Air Quality Forecast for {{ city_name }} Station
           </h2>
           <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
+          <!-- 🆕 顯示當前觀測時間 -->
+          {% if current_obs_time != "N/A" %}
+          <p class="text-sm text-gray-500 mt-1">最近觀測時間: {{ current_obs_time }}</p>
+          {% endif %}
       </header>
 
       <div id="maxAqiCard" class="shadow-2xl rounded-xl p-8 mb-10 text-white flex justify-between items-center" 
            style="background-color: #2c3e50;">
           <div>
               <p class="text-lg font-medium opacity-80">
-                  Maximum Predicted AQI in the next 24 hours
+                  {% if is_fallback %}
+                  當前觀測 AQI
+                  {% else %}
+                  未來 24 小時最高 AQI
+                  {% endif %}
               </p>
               <h2 id="maxAqiValue" class="text-7xl font-black mt-1">
                   {{ max_aqi }}
@@ -97,7 +157,7 @@
           <div 
             id="aqiStatus"
             class="rounded-full px-6 py-2 text-xl font-bold text-white shadow-md
-            {% if max_aqi == 'N/A' %}
+            {% if max_aqi == 'N/A' or max_aqi == 'ERROR' %}
                 bg-gray-500
             {% elif max_aqi | int <= 50 %}
                 bg-green-500
@@ -112,7 +172,9 @@
             {% endif %}
             ">
             {% if max_aqi == "N/A" %}
-                N/A
+                無數據
+            {% elif max_aqi == "ERROR" %}
+                錯誤
             {% elif max_aqi | int <= 50 %}
                 Good
             {% elif max_aqi | int <= 100 %}
@@ -125,85 +187,115 @@
                 Very Unhealthy
             {% endif %}
             </div>
-
       </div>
 
-      <!-- 📈 AQI Chart -->
+      <!-- AQI Chart -->
       <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
           <h3 class="text-2xl font-bold text-gray-800 mb-4">
-              AQI Trend Chart
+              {% if is_fallback %}
+              當前 AQI（無預測數據）
+              {% else %}
+              AQI 趨勢預測
+              {% endif %}
           </h3>
           <div class="relative" style="height: 400px;">
               <canvas id="aqiChart"></canvas>
+          </div>
+          <!-- 🆕 無數據提示 -->
+          <div id="noDataWarning" style="display: none;" class="text-center py-8">
+              <p class="text-gray-500 text-lg">⚠️ 暫無預測數據</p>
+              <p class="text-gray-400 text-sm mt-2">可能原因：模型未載入或測站數據不足</p>
           </div>
       </div>
   </div>
 
   <script>
-  // ---------- Chart.js 圖表邏輯 ----------
   window.onload = function() {
+      debugLog('開始載入圖表...', 'info');
       document.getElementById("content").style.display = "block";
 
       let predictions = [];
       try {
           const jsonStr = '{{ aqi_predictions | tojson | safe }}';
+          debugLog(`接收到的 JSON 長度: ${jsonStr.length}`, 'info');
           predictions = JSON.parse(jsonStr);
-      } catch (e) { console.warn("無法解析 AQI 預測資料"); }
+          debugLog(`解析成功，預測數量: ${predictions.length}`, 'success');
+      } catch (e) { 
+          debugLog(`JSON 解析失敗: ${e.message}`, 'error');
+      }
 
-      if (!predictions || predictions.length === 0) return;
+      if (!predictions || predictions.length === 0) {
+          debugLog('無預測數據，顯示警告', 'warning');
+          document.getElementById('noDataWarning').style.display = 'block';
+          document.getElementById('aqiChart').style.display = 'none';
+          return;
+      }
 
       const labels = predictions.map(p => p.time);
       const data = predictions.map(p => (p.aqi === "N/A" ? null : p.aqi));
-      const ctx = document.getElementById('aqiChart').getContext('2d');
-      const yMax = Math.ceil(Math.max(...data.filter(v => v !== null)) / 50) * 50 + 10;
+      
+      debugLog(`圖表標籤數: ${labels.length}, 數據點數: ${data.filter(d => d !== null).length}`, 'info');
 
-      new Chart(ctx, {
-          type: 'line',
-          data: {
-              labels: labels,
-              datasets: [{
-                  label: 'AQI',
-                  data: data,
-                  borderColor: '#3B82F6',
-                  backgroundColor: 'rgba(59,130,246,0.15)',
-                  borderWidth: 3,
-                  fill: true,
-                  tension: 0.4,
-                  pointRadius: 5,
-                  pointBackgroundColor: data.map(v => {
-                      if (v <= 50) return '#10B981';
-                      if (v <= 100) return '#EAB308';
-                      if (v <= 150) return '#F97316';
-                      if (v <= 200) return '#DC2626';
-                      return '#7C3AED';
-                  })
-              }]
-          },
-          options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              scales: {
-                  y: {
-                      beginAtZero: true,
-                      suggestedMax: yMax,
-                      ticks: { stepSize: 10 },
-                      grid: {
-                          color: (ctx) => (ctx.tick.value % 50 === 0 ? '#9CA3AF' : '#E5E7EB'),
-                          lineWidth: (ctx) => (ctx.tick.value % 50 === 0 ? 1.5 : 0.5)
-                      }
-                  },
-                  x: {
-                      ticks: {
-                          maxRotation: 45, minRotation: 45,
-                          callback: function(value, index) {
-                              const fullLabel = this.getLabelForValue(value);
-                              return (index % 6 === 0) ? fullLabel : fullLabel.split(' ')[1];
+      const ctx = document.getElementById('aqiChart').getContext('2d');
+      const validData = data.filter(v => v !== null);
+      const yMax = validData.length > 0 
+          ? Math.ceil(Math.max(...validData) / 50) * 50 + 10 
+          : 100;
+
+      try {
+          new Chart(ctx, {
+              type: 'line',
+              data: {
+                  labels: labels,
+                  datasets: [{
+                      label: 'AQI',
+                      data: data,
+                      borderColor: '#3B82F6',
+                      backgroundColor: 'rgba(59,130,246,0.15)',
+                      borderWidth: 3,
+                      fill: true,
+                      tension: 0.4,
+                      pointRadius: 5,
+                      pointBackgroundColor: data.map(v => {
+                          if (v === null) return '#9CA3AF';
+                          if (v <= 50) return '#10B981';
+                          if (v <= 100) return '#EAB308';
+                          if (v <= 150) return '#F97316';
+                          if (v <= 200) return '#DC2626';
+                          return '#7C3AED';
+                      })
+                  }]
+              },
+              options: {
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  scales: {
+                      y: {
+                          beginAtZero: true,
+                          suggestedMax: yMax,
+                          ticks: { stepSize: 10 },
+                          grid: {
+                              color: (ctx) => (ctx.tick.value % 50 === 0 ? '#9CA3AF' : '#E5E7EB'),
+                              lineWidth: (ctx) => (ctx.tick.value % 50 === 0 ? 1.5 : 0.5)
+                          }
+                      },
+                      x: {
+                          ticks: {
+                              maxRotation: 45, 
+                              minRotation: 45,
+                              callback: function(value, index) {
+                                  const fullLabel = this.getLabelForValue(value);
+                                  return (index % 6 === 0) ? fullLabel : fullLabel.split(' ')[1];
+                              }
                           }
                       }
                   }
               }
-          }
-      });
+          });
+          debugLog('圖表繪製成功！', 'success');
+      } catch (e) {
+          debugLog(`圖表繪製失敗: ${e.message}`, 'error');
+      }
   };
   </script>
 </body>
