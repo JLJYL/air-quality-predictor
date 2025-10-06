@@ -557,11 +557,15 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     weather_feature_names = [col for col in weather_feature_names_base if col in feature_cols]
     has_weather = bool(weather_feature_names)
 
-    # 預處理天氣預報：設置 'datetime' 為索引並轉為字典
     weather_dict = {}
     if weather_df is not None and not weather_df.empty:
         # 確保天氣預報的 datetime 也是 UTC-aware
         weather_df['datetime'] = pd.to_datetime(weather_df['datetime']).dt.tz_convert('UTC')
+        
+        # 🎯 關鍵修正：在設定索引前，移除重複的時間戳記
+        #    保留第一個出現的值 (keep='first')
+        weather_df = weather_df.drop_duplicates(subset=['datetime'], keep='first')
+        
         weather_df = weather_df.set_index('datetime')
         weather_dict = weather_df.to_dict(orient='index')
         print(f"✅ [Weather] Weather data loaded for {len(weather_dict)} hours.")
