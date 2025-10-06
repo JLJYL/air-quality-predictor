@@ -396,10 +396,23 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     df_all = df_all.drop(columns=["dt_diff", "units", "ts_local"])
 
     # 4. Convert to model input format (single-row wide table)
-    observation = df_all.pivot_table(
-        index='ts_utc', columns='parameter', values='value', aggfunc='first'
-    ).reset_index()
-    observation = observation.rename(columns={'ts_utc': 'datetime'})
+    # 🚨 關鍵修正 2：確保只有單一的時間戳記被用於輸出 DataFrame 的 'datetime'
+    unique_ts = df_all['ts_utc'].iloc[0] if not df_all.empty else pd.NaT
+    
+    if pd.isna(unique_ts):
+        return pd.DataFrame()
+        
+    df_all_no_ts = df_all.drop(columns=['ts_utc'])
+    
+    observation = df_all_no_ts.pivot_table(
+        index=df_all_no_ts.index, # 使用當前索引，避免使用重複的 'ts_utc' 欄位作為索引
+        columns='parameter', 
+        values='value', 
+        aggfunc='first'
+    ).reset_index(drop=True)
+    
+    # 手動將時間戳記加回為單一行數據
+    observation.insert(0, 'datetime', unique_ts)
     
     # Calculate AQI
     if not observation.empty:
@@ -490,10 +503,11 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    # 初始化特徵字典
-    current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
-                             if col in last_data.columns and not last_data[col].empty 
-                             else np.nan 
+    # 🚨 關鍵修正 1：魯棒地獲取單行數據字典 (解決 DataFrame 索引問題)
+    last_data_record = last_data.iloc[0].to_dict()
+
+    # 初始化特徵字典：現在從 last_data_record 中提取數據
+    current_data_dict = {col: last_data_record.get(col, np.nan) 
                              for col in feature_cols} 
 
     weather_feature_names_base = ['temperature', 'humidity', 'pressure']
