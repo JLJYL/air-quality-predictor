@@ -30,7 +30,6 @@ TOL_MINUTES_FALLBACK = 180
 LAG_HOURS = [1]
 ROLLING_WINDOWS = []
 
-# ✅ 新增：預設位置（台灣台中）作為後備
 DEFAULT_LAT = 24.1477
 DEFAULT_LON = 120.6736
 DEFAULT_LOCATION_NAME = "台中市"
@@ -51,13 +50,55 @@ current_location_name = None
 LOCAL_TZ = "Asia/Taipei"
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] 
 
+# ✅ EPA 2024 AQI Breakpoints
 AQI_BREAKPOINTS = {
-    "pm25": [(0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150), (55.5, 150.4, 151, 200)],
-    "pm10": [(0, 54, 0, 50), (55, 154, 51, 100), (155, 254, 101, 150), (255, 354, 151, 200)],
-    "o3": [(0, 54, 0, 50), (55, 70, 51, 100), (71, 85, 101, 150), (86, 105, 151, 200)],
-    "co": [(0.0, 4.4, 0, 50), (4.5, 9.4, 51, 100), (9.5, 12.4, 101, 150), (12.5, 15.4, 151, 200)],
-    "no2": [(0, 100, 0, 50), (101, 360, 51, 100), (361, 649, 101, 150), (650, 1249, 151, 200)],
-    "so2": [(0, 35, 0, 50), (36, 75, 51, 100), (76, 185, 101, 150), (186, 304, 151, 200)],
+    "pm25": [
+        (0.0, 9.0, 0, 50),
+        (9.1, 35.4, 51, 100),
+        (35.5, 55.4, 101, 150),
+        (55.5, 125.4, 151, 200),
+        (125.5, 225.4, 201, 300),
+        (225.5, 325.4, 301, 500)
+    ],
+    "pm10": [
+        (0, 54, 0, 50),
+        (55, 154, 51, 100),
+        (155, 254, 101, 150),
+        (255, 354, 151, 200),
+        (355, 424, 201, 300),
+        (425, 604, 301, 500)
+    ],
+    "o3": [  # 8-hour ozone
+        (0, 54, 0, 50),
+        (55, 70, 51, 100),
+        (71, 85, 101, 150),
+        (86, 105, 151, 200),
+        (106, 200, 201, 300)
+    ],
+    "co": [  # 8-hour CO in ppm
+        (0.0, 4.4, 0, 50),
+        (4.5, 9.4, 51, 100),
+        (9.5, 12.4, 101, 150),
+        (12.5, 15.4, 151, 200),
+        (15.5, 30.4, 201, 300),
+        (30.5, 50.4, 301, 500)
+    ],
+    "no2": [  # 1-hour NO2 in ppb
+        (0, 53, 0, 50),
+        (54, 100, 51, 100),
+        (101, 360, 101, 150),
+        (361, 649, 151, 200),
+        (650, 1249, 201, 300),
+        (1250, 2049, 301, 500)
+    ],
+    "so2": [  # 1-hour SO2 in ppb
+        (0, 35, 0, 50),
+        (36, 75, 51, 100),
+        (76, 185, 101, 150),
+        (186, 304, 151, 200),
+        (305, 604, 201, 300),
+        (605, 1004, 301, 500)
+    ],
 }
 
 def get_location_meta(location_id: int):
@@ -425,7 +466,7 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     return observation
 
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
-    """Calculates the AQI sub-index."""
+    """✅ EPA 2024 AQI Calculation with extended ranges"""
     if pd.isna(concentration) or concentration < 0:
         return np.nan
 
@@ -433,6 +474,7 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     if not breakpoints:
         return np.nan
 
+    # Find appropriate breakpoint range
     for C_low, C_high, I_low, I_high in breakpoints:
         if C_low <= concentration <= C_high:
             if C_high == C_low:
@@ -440,14 +482,15 @@ def calculate_aqi_sub_index(param: str, concentration: float) -> float:
             I = ((I_high - I_low) / (C_high - C_low)) * (concentration - C_low) + I_low
             return np.round(I)
 
-        if concentration > breakpoints[-1][1]:
-            I_low, I_high = breakpoints[-1][2], breakpoints[-1][3]
-            C_low, C_high = breakpoints[-1][0], breakpoints[-1][1]
-            if C_high == C_low:
-                return I_high
-            I_rate = (I_high - I_low) / (C_high - C_low)
-            I = I_high + I_rate * (concentration - C_high)
-            return np.round(I)
+    # Handle values above highest breakpoint
+    if concentration > breakpoints[-1][1]:
+        I_low, I_high = breakpoints[-1][2], breakpoints[-1][3]
+        C_low, C_high = breakpoints[-1][0], breakpoints[-1][1]
+        if C_high == C_low:
+            return I_high
+        I_rate = (I_high - I_low) / (C_high - C_low)
+        I = I_high + I_rate * (concentration - C_high)
+        return np.round(I)
 
     return np.nan
 
@@ -604,245 +647,4 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                     if lag_col in current_data_dict:
                         current_data_dict[lag_col] = new_pollutant_values[param]
 
-        print(f"\n✅ [Predict] 成功生成 {len(predictions)} 個預測時間點")
-        print(f"   模型調用總次數: {total_predictions}")
-        
-        if skipped_reasons:
-            print(f"\n⚠️ [Predict] 跳過的污染物:")
-            for param, reason in skipped_reasons.items():
-                print(f"   - {param}: {reason}")
-
-    except Exception as e:
-        print(f"❌ [Predict] 預測錯誤: {e}")
-        import traceback
-        traceback.print_exc()
-
-    return pd.DataFrame(predictions)
-
-def load_models_and_metadata():
-    global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
-
-    if not os.path.exists(MODELS_DIR) or not os.path.exists(META_PATH):
-        print("🚨 [Load] 模型資料夾或 metadata 檔案不存在")
-        return
-
-    try:
-        with open(META_PATH, 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-
-        POLLUTANT_PARAMS = metadata.get('pollutant_params', [])
-        FEATURE_COLUMNS = metadata.get('feature_columns', [])
-        
-        if 'last_observation_json' in metadata:
-            LAST_OBSERVATION = pd.read_json(metadata['last_observation_json'], orient='records')
-
-        TRAINED_MODELS = {}
-        params_to_remove = []
-        for param in POLLUTANT_PARAMS:
-            model_path = os.path.join(MODELS_DIR, f'{param}_model.json')
-            if os.path.exists(model_path):
-                model = xgb.XGBRegressor()
-                model.load_model(model_path)
-                TRAINED_MODELS[param] = model
-            else:
-                print(f"❌ [Load] 找不到模型檔案: {model_path}")
-                params_to_remove.append(param)
-        
-        for param in params_to_remove:
-            POLLUTANT_PARAMS.remove(param)
-
-        if TRAINED_MODELS:
-            print(f"✅ [Load] 成功載入 {len(TRAINED_MODELS)} 個模型")
-            print(f"   監測項目: {', '.join(POLLUTANT_PARAMS)}")
-            print(f"   特徵數量: {len(FEATURE_COLUMNS)}")
-        else:
-            print("🚨 [Load] 沒有成功載入任何模型")
-
-    except Exception as e:
-        print(f"❌ [Load] 模型載入失敗: {e}") 
-        import traceback
-        traceback.print_exc()
-
-app = Flask(__name__)
-
-with app.app_context():
-    load_models_and_metadata() 
-
-@app.route('/')
-def index():
-    """主路由"""
-    global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
-    global current_location_id, current_location_name
-    
-    try:
-        print("\n" + "="*60)
-        print("🚀 [Request] 開始處理新請求")
-        print("="*60)
-
-        # ✅ 修改：優雅處理缺少座標的情況
-        lat_param = request.args.get('lat', type=float)
-        lon_param = request.args.get('lon', type=float)
-
-        if lat_param is None or lon_param is None:
-            print(f"⚠️ [Request] 缺少座標參數，使用預設位置：{DEFAULT_LOCATION_NAME}")
-            user_lat, user_lon = DEFAULT_LAT, DEFAULT_LON
-            using_default = True
-        else:
-            user_lat, user_lon = lat_param, lon_param
-            using_default = False
-            print(f"📍 [Request] 使用用戶座標 → lat={user_lat}, lon={user_lon}")
-
-        # 搜尋最近測站
-        loc_id, loc_name, lat_found, lon_found = get_nearest_location(user_lat, user_lon)
-        
-        if loc_id is None:
-            print("❌ [Station] 找不到任何測站")
-            error_msg = f"附近 25km 內沒有可用的空氣品質監測站"
-            if using_default:
-                error_msg = f"預設位置（{DEFAULT_LOCATION_NAME}）" + error_msg
-            return render_template(
-                'index.html',
-                max_aqi="N/A",
-                aqi_predictions=[],
-                city_name=f"({user_lat:.4f}, {user_lon:.4f})",
-                current_obs_time="N/A",
-                is_fallback=True,
-                error_message=error_msg
-            )
-
-        current_location_id = loc_id
-        current_location_name = loc_name
-        station_lat, station_lon = lat_found, lon_found
-
-        print(f"\n🌤️  [Weather] 獲取天氣預報 ({station_lat}, {station_lon})")
-        weather_forecast_df = get_weather_forecast(station_lat, station_lon)
-
-        print(f"\n📊 [Observation] 獲取觀測數據 (測站 ID: {current_location_id})")
-        current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
-
-        if not current_observation_raw.empty:
-            print(f"✅ [Observation] 獲得觀測數據")
-            print(current_observation_raw.to_string(index=False))
-        else:
-            print("🚨 [Observation] 無觀測數據")
-
-        if not current_observation_raw.empty and 'aqi' in current_observation_raw.columns:
-            obs_aqi_val = current_observation_raw['aqi'].iloc[0]
-            obs_time_val = current_observation_raw['datetime'].iloc[0]
-            CURRENT_OBSERVATION_AQI = int(obs_aqi_val) if pd.notna(obs_aqi_val) else "N/A"
-            if pd.notna(obs_time_val):
-                if obs_time_val.tz is None:
-                    obs_time_val = obs_time_val.tz_localize('UTC')
-                CURRENT_OBSERVATION_TIME = obs_time_val.tz_convert(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
-            print(f"📍 [Current AQI] {CURRENT_OBSERVATION_AQI} @ {CURRENT_OBSERVATION_TIME}")
-        else:
-            CURRENT_OBSERVATION_AQI = "N/A"
-            CURRENT_OBSERVATION_TIME = "N/A"
-
-        observation_for_prediction = None
-        is_valid_for_prediction = False
-        is_fallback_mode = True
-
-        if not current_observation_raw.empty:
-            observation_for_prediction = current_observation_raw.copy()
-            observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
-            if observation_for_prediction['datetime'].dt.tz is None:
-                observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize('UTC')
-            else:
-                observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
-            is_valid_for_prediction = True
-
-        max_aqi = CURRENT_OBSERVATION_AQI
-        aqi_predictions = []
-
-        if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
-            print(f"\n🔮 [Prediction] 開始預測未來 {HOURS_TO_PREDICT} 小時")
-            try:
-                future_predictions = predict_future_multi(
-                    TRAINED_MODELS,
-                    observation_for_prediction,
-                    FEATURE_COLUMNS,
-                    POLLUTANT_PARAMS,
-                    hours=HOURS_TO_PREDICT,
-                    weather_df=weather_forecast_df
-                )
-
-                if not future_predictions.empty:
-                    future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
-                    predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
-                    
-                    if predictions_df['datetime_local'].duplicated().any():
-                        print("⚠️ [Predict] 移除重複預測時間")
-                        predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first')
-                    
-                    max_aqi_val = predictions_df['aqi_pred'].max()
-                    max_aqi = int(max_aqi_val) if pd.notna(max_aqi_val) else CURRENT_OBSERVATION_AQI
-                    
-                    predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
-                        lambda x: int(x) if pd.notna(x) else "N/A"
-                    )
-                    
-                    aqi_predictions = [
-                        {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
-                        for item in predictions_df.to_dict(orient='records')
-                    ]
-                    
-                    if aqi_predictions:
-                        is_fallback_mode = False
-                        print(f"✅ [Predict] 預測成功")
-                        
-            except Exception as e:
-                print(f"❌ [Predict] 預測失敗: {e}")
-                import traceback
-                traceback.print_exc()
-
-        if is_fallback_mode:
-            print("🚨 [Fallback] 僅顯示觀測值")
-            if CURRENT_OBSERVATION_AQI != "N/A":
-                aqi_predictions = [{
-                    'time': CURRENT_OBSERVATION_TIME,
-                    'aqi': CURRENT_OBSERVATION_AQI,
-                    'is_obs': True
-                }]
-
-        print(f"\n📊 [Final] max_aqi={max_aqi}, predictions={len(aqi_predictions)}, fallback={is_fallback_mode}")
-        print("="*60 + "\n")
-
-        return render_template(
-            'index.html',
-            max_aqi=max_aqi,
-            aqi_predictions=aqi_predictions,
-            city_name=current_location_name,
-            current_obs_time=CURRENT_OBSERVATION_TIME,
-            is_fallback=is_fallback_mode
-        )
-        
-    except Exception as e:
-        print(f"❌ [Route] 嚴重錯誤: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return render_template(
-            'index.html',
-            max_aqi="ERROR",
-            aqi_predictions=[],
-            city_name="系統錯誤",
-            current_obs_time="N/A",
-            is_fallback=True
-        )
-
-@app.route('/health')
-def health_check():
-    """健康檢查端點"""
-    import sys
-    return {
-        'status': 'ok',
-        'models_loaded': len(TRAINED_MODELS),
-        'pollutants': POLLUTANT_PARAMS,
-        'features': len(FEATURE_COLUMNS),
-        'python_version': sys.version,
-        'default_location': f"{DEFAULT_LOCATION_NAME} ({DEFAULT_LAT}, {DEFAULT_LON})"
-    }
-
-if __name__ == '__main__':
-    app.run(debug=True)
+        print(f"\n✅ [Predict] 成功生成 {len(predictions)} 個預測時
