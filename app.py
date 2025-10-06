@@ -238,41 +238,60 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 # =================================================================
 # Open-Meteo Weather Fetching (新增)
 # =================================================================
-# 設置快取和重試
-cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
-retry_session = openmeteo_requests.create_retry_session(session=cache_session)
-openmeteo_client = openmeteo_requests.Client(session=retry_session)
+# 設置快取和重試 (新版 openmeteo_requests 無 create_retry_session)
+cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
+openmeteo_client = openmeteo_requests.Client(session=cache_session)
+
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
-    """
-    Fetches 24-hour weather forecast for the given coordinates from Open-Meteo.
-    Returns a DataFrame with 'datetime', 'temperature', 'humidity', 'pressure'.
-    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": ["temperature_2m", "relative_humidity_2m", "surface_pressure"],
         "timezone": "UTC",
-        "forecast_days": 2, # 獲取足夠多的數據來覆蓋接下來 24 小時
+        "forecast_days": 2, 
     }
     
     try:
         responses = openmeteo_client.weather_api(url, params=params)
         
-        if not responses or not responses[0].IsInitialized():
-             print("❌ [Weather] Open-Meteo did not return initialized data.")
+        if not responses:
+             print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
-        response = responses[0]
+        response = responses[0] # 🚨 這是必須的賦值
+
+        # 檢查 Hourly 資料
+        if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
+             print("❌ [Weather] Open-Meteo response is missing valid hourly data.")
+             return pd.DataFrame()
+             
         hourly = response.Hourly()
+
+        # ========== 🎯 最終簡化時間獲取邏輯 ==========
         
+        # ⚠️ 這是最後的嘗試：直接呼叫 hourly.Time() 不帶任何參數，
+        #    期望它能返回整個時間戳記陣列（NumPy 格式）。
+        try:
+             # 注意：openmeteo_requests 的 Time() 返回的是 Unix timestamp 陣列
+             time_stamps = hourly.Time() 
+        except Exception as e:
+             # 如果還是失敗，我們將拋棄整個函式庫，並打印出警告。
+             print(f"❌ [Weather] FATAL ERROR: Cannot retrieve time series from hourly.Time(): {e}")
+             print("🚨 建議：考慮將 openmeteo_requests 降級或改用 requests 函式庫手動解析 JSON。")
+             return pd.DataFrame()
+
+
         # 轉換為 DataFrame
         hourly_data = {
-            "datetime": pd.to_datetime([hourly.Time(i) for i in range(len(hourly.Time()))], unit="s", utc=True),
+            # 將獲取到的時間戳記陣列直接轉換
+            "datetime": pd.to_datetime(time_stamps, unit="s", utc=True),
+            
+            # 其他變數保持不變
             "temperature": hourly.Variables(0).ValuesAsNumpy(),
-            "humidity": hourly.Variables(1).ValuesAsNumpy(), # relative_humidity_2m
-            "pressure": hourly.Variables(2).ValuesAsNumpy(), # surface_pressure
+            "humidity": hourly.Variables(1).ValuesAsNumpy(), 
+            "pressure": hourly.Variables(2).ValuesAsNumpy(),
         }
         
         df = pd.DataFrame(hourly_data)
@@ -293,7 +312,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         print(f"✅ [Weather] Fetched {len(df)} hours of weather forecast.")
         
         return df
-        
+
     except Exception as e:
         print(f"❌ [Weather] Failed to fetch weather forecast: {e}")
         return pd.DataFrame()
@@ -402,6 +421,9 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
         else:
              # 如果已經有時區，轉換到 UTC (確保一致性)
              observation['datetime'] = observation['datetime'].dt.tz_convert('UTC')
+             
+        # 額外確保只返回最新的一行，避免多行觀測數據導致預測錯誤
+        observation = observation.sort_values('datetime', ascending=False).head(1)
 
     return observation
 
@@ -474,6 +496,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     last_datetime_aware = last_data['datetime'].iloc[0]
     
     # 初始化特徵字典
+    # 注意：這裡假設 last_data 是單行數據（已在 fetch_latest_observation_data 中處理）
     current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
                              if col in last_data.columns and not last_data[col].empty 
                              else np.nan 
@@ -660,7 +683,7 @@ def index():
     global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
     global current_location_id, current_location_name
     global TARGET_LAT, TARGET_LON
-    station_lat, station_lon = TARGET_LAT, TARGET_LON # 預設使用TARGET，如果找到測站則更新
+    station_lat, station_lon = TARGET_LAT, TARGET_LON  # 預設使用 TARGET，如果找到測站則更新
 
     # ========== 1️⃣ 從網址參數抓座標 ==========
     lat_param = request.args.get('lat', type=float)
@@ -677,19 +700,19 @@ def index():
     if loc_id:
         current_location_id = loc_id
         current_location_name = loc_name
-        station_lat, station_lon = lat_found, lon_found # 使用測站的精確坐標來獲取天氣
+        station_lat, station_lon = lat_found, lon_found  # 使用測站的精確坐標來獲取天氣
         print(f"✅ [Nearest Station Found] {loc_name} (ID: {loc_id})")
-        print(f"📍 Station Coordinates : {station_lat}, {station_lon}")
+        print(f"📍 Station Coordinates : {station_lat}, {lon_found}")
     else:
         print("⚠️ [Nearest] No valid station found, fallback to default Kaohsiung")
         current_location_id = DEFAULT_LOCATION_ID
         current_location_name = DEFAULT_LOCATION_NAME
-        # 如果找不到測站，使用 TARGET 坐標來獲取天氣
 
     # ⭐️ 新增：獲取天氣預報
     weather_forecast_df = get_weather_forecast(station_lat, station_lon)
 
     # ========== 3️⃣ 取得觀測資料 ==========
+    # 注意：fetch_latest_observation_data 內部已修正為只返回最新的一行
     current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
 
     if not current_observation_raw.empty:
@@ -711,30 +734,39 @@ def index():
         CURRENT_OBSERVATION_AQI = "N/A"
         CURRENT_OBSERVATION_TIME = "N/A"
 
-    # ========== 5️⃣ 建立預測或回退顯示 ==========
+    # ========== 5️⃣ 建立預測或回退顯示（方案 A 改版） ==========
     observation_for_prediction = None
     is_valid_for_prediction = False
     is_fallback_mode = True
 
-    if not current_observation_raw.empty and LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-        observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
-        latest_row = current_observation_raw.iloc[0]
-        dt_val = latest_row['datetime']
-        if pd.to_datetime(dt_val).tz is not None:
-            dt_val = pd.to_datetime(dt_val).tz_convert(None)
-        observation_for_prediction['datetime'] = dt_val
+    # ✅ 改用新觀測資料作為預測起點
+    if not current_observation_raw.empty:
+        # current_observation_raw 已經是單一行，直接複製即可
+        observation_for_prediction = current_observation_raw.copy()
 
-        for col in latest_row.index:
-            if col in observation_for_prediction.columns and not any(s in col for s in ['lag_', 'rolling_']):
-                if col in POLLUTANT_TARGETS or col == 'aqi' or col in ['temperature', 'humidity', 'pressure']:
-                    observation_for_prediction[col] = latest_row[col]
+        # 確保時間欄位是 UTC-aware (雖在 fetch 內已處理，再次確保)
+        observation_for_prediction['datetime'] = pd.to_datetime(observation_for_prediction['datetime'])
+        if observation_for_prediction['datetime'].dt.tz is None:
+            observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_localize('UTC')
+        else:
+            observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
 
-        if all(col in observation_for_prediction.columns for col in FEATURE_COLUMNS):
+        is_valid_for_prediction = True
+        print("\n🧾 [DEBUG] Observation used for prediction:")
+        # 這裡打印轉置後的單行 DataFrame
+        print(observation_for_prediction.head(1).T)
+
+    else:
+        # ⚠️ 若該地區沒有即時觀測資料，才退回舊的 LAST_OBSERVATION
+        if LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
+            observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
             is_valid_for_prediction = True
+            print("⚠️ [Fallback] Using last known observation for prediction.")
 
     max_aqi = CURRENT_OBSERVATION_AQI
     aqi_predictions = []
 
+    # ========== 6️⃣ 模型預測或回退 ==========
     if TRAINED_MODELS and POLLUTANT_PARAMS and is_valid_for_prediction and observation_for_prediction is not None:
         try:
             # ⭐️ 傳遞天氣預報數據
@@ -744,9 +776,9 @@ def index():
                 FEATURE_COLUMNS,
                 POLLUTANT_PARAMS,
                 hours=HOURS_TO_PREDICT,
-                weather_df=weather_forecast_df # 傳遞 Open-Meteo 預報
+                weather_df=weather_forecast_df  # 傳遞 Open-Meteo 預報
             )
-            
+
             future_predictions['datetime_local'] = future_predictions['datetime'].dt.tz_convert(LOCAL_TZ)
             predictions_df = future_predictions[['datetime_local', 'aqi_pred']].copy()
             max_aqi_val = predictions_df['aqi_pred'].max()
@@ -755,6 +787,13 @@ def index():
             predictions_df['aqi'] = predictions_df['aqi_pred'].apply(
                 lambda x: int(x) if x != "N/A" else "N/A"
             ).astype(object)
+            
+            # 🚨 關鍵修正：確保預測結果的索引唯一性 (解決 'DataFrame index must be unique' 錯誤)
+            if predictions_df['datetime_local'].duplicated().any():
+                print("⚠️ [Predict] Duplicated prediction times found. Dropping duplicate rows.")
+                # 以時間為準，保留第一個預測值，丟棄所有重複的時間點。
+                predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first').reset_index(drop=True)
+
             aqi_predictions = [
                 {'time': item['datetime_local'].strftime('%Y-%m-%d %H:%M'), 'aqi': item['aqi']}
                 for item in predictions_df.to_dict(orient='records')
@@ -774,7 +813,7 @@ def index():
                 'is_obs': True
             }]
 
-    # ========== 6️⃣ 輸出頁面 ==========
+    # ========== 7️⃣ 輸出頁面 ==========
     return render_template(
         'index.html',
         max_aqi=max_aqi,
@@ -782,7 +821,8 @@ def index():
         city_name=current_location_name,
         current_obs_time=CURRENT_OBSERVATION_TIME,
         is_fallback=is_fallback_mode
-    )
+)
+
 
 
 if __name__ == '__main__':
