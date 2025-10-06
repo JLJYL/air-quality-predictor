@@ -2,12 +2,4 @@ Flask
 requests
 pandas
 numpy
-scikit-learn
-xgboost
-matplotlib
-seaborn
-meteostat
-tzdata
-gunicorn
-openmeteo-requests
 requests-cache
