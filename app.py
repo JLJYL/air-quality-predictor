@@ -1,7 +1,4 @@
-# 終極修復版 app.py - 修復三個關鍵問題
-# 修復 1: 測站參數檢測
-# 修復 2: 天氣 API 相容性
-# 修復 3: 允許無天氣數據預測
+
 
 import requests
 import pandas as pd
