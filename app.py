@@ -873,7 +873,38 @@ def index():
             current_obs_time="N/A",
             is_fallback=True
         )
+@app.route('/health')
+def health_check():
+    """健康檢查端點"""
+    import sys
+    return {
+        'status': 'ok',
+        'models_loaded': len(TRAINED_MODELS),
+        'pollutants': POLLUTANT_PARAMS,
+        'features': len(FEATURE_COLUMNS),
+        'last_observation_available': LAST_OBSERVATION is not None,
+        'python_version': sys.version,
+        'models_dir_exists': os.path.exists(MODELS_DIR),
+        'model_files': os.listdir(MODELS_DIR) if os.path.exists(MODELS_DIR) else []
+    }
 
+@app.route('/test-station')
+def test_station():
+    """測試測站選擇邏輯"""
+    lat = request.args.get('lat', 24.1516, type=float)
+    lon = request.args.get('lon', 120.6424, type=float)
+    
+    loc_id, loc_name, lat_found, lon_found = get_nearest_location(lat, lon)
+    
+    return {
+        'input': {'lat': lat, 'lon': lon},
+        'result': {
+            'station_id': loc_id,
+            'station_name': loc_name,
+            'station_lat': lat_found,
+            'station_lon': lon_found
+        }
+    }
 
 if __name__ == '__main__':
     app.run(debug=True)
