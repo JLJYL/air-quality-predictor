@@ -238,7 +238,7 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
 # =================================================================
 # Open-Meteo Weather Fetching (新增)
 # =================================================================
-# 設置快取和重試 (新版 openmeteo_requests 無 create_retry_session)
+# 設置快取和重試
 cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
 openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
@@ -260,7 +260,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              print("❌ [Weather] Open-Meteo returned an empty response list.")
              return pd.DataFrame()
              
-        response = responses[0] # 🚨 這是必須的賦值
+        response = responses[0] 
 
         # 檢查 Hourly 資料
         if not response.Hourly() or response.Hourly().Variables(0).ValuesAsNumpy().size == 0:
@@ -269,15 +269,10 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
              
         hourly = response.Hourly()
 
-        # ========== 🎯 最終簡化時間獲取邏輯 ==========
-        
-        # ⚠️ 這是最後的嘗試：直接呼叫 hourly.Time() 不帶任何參數，
-        #    期望它能返回整個時間戳記陣列（NumPy 格式）。
+        # 獲取時間戳記
         try:
-             # 注意：openmeteo_requests 的 Time() 返回的是 Unix timestamp 陣列
              time_stamps = hourly.Time() 
         except Exception as e:
-             # 如果還是失敗，我們將拋棄整個函式庫，並打印出警告。
              print(f"❌ [Weather] FATAL ERROR: Cannot retrieve time series from hourly.Time(): {e}")
              print("🚨 建議：考慮將 openmeteo_requests 降級或改用 requests 函式庫手動解析 JSON。")
              return pd.DataFrame()
@@ -496,7 +491,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     last_datetime_aware = last_data['datetime'].iloc[0]
     
     # 初始化特徵字典
-    # 注意：這裡假設 last_data 是單行數據（已在 fetch_latest_observation_data 中處理）
     current_data_dict = {col: last_data.get(col, np.nan).iloc[0] 
                              if col in last_data.columns and not last_data[col].empty 
                              else np.nan 
@@ -511,6 +505,12 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
     if weather_df is not None and not weather_df.empty:
         # 確保天氣預報的 datetime 也是 UTC-aware
         weather_df['datetime'] = pd.to_datetime(weather_df['datetime']).dt.tz_convert('UTC')
+        
+        # 🚨 關鍵修正：強制移除天氣預報中的重複時間戳記
+        if weather_df['datetime'].duplicated().any():
+            print("⚠️ [Weather] Duplicated forecast times found. Dropping duplicate weather rows.")
+            weather_df = weather_df.drop_duplicates(subset=['datetime'], keep='first')
+        
         weather_df = weather_df.set_index('datetime')
         weather_dict = weather_df.to_dict(orient='index')
         print(f"✅ [Weather] Weather data loaded for {len(weather_dict)} hours.")
@@ -788,10 +788,9 @@ def index():
                 lambda x: int(x) if x != "N/A" else "N/A"
             ).astype(object)
             
-            # 🚨 關鍵修正：確保預測結果的索引唯一性 (解決 'DataFrame index must be unique' 錯誤)
+            # 🚨 預測結果修正：確保預測結果的索引唯一性 
             if predictions_df['datetime_local'].duplicated().any():
                 print("⚠️ [Predict] Duplicated prediction times found. Dropping duplicate rows.")
-                # 以時間為準，保留第一個預測值，丟棄所有重複的時間點。
                 predictions_df = predictions_df.drop_duplicates(subset=['datetime_local'], keep='first').reset_index(drop=True)
 
             aqi_predictions = [
