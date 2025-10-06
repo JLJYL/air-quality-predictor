@@ -1,5 +1,3 @@
-
-
 import requests
 import pandas as pd
 import datetime
@@ -29,15 +27,13 @@ PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
 TOL_MINUTES_PRIMARY = 120
 TOL_MINUTES_FALLBACK = 180
 
-# ✅ 核心修改 1: 只用 1 小時 lag
-LAG_HOURS = [1]  # 原本是 [1, 2, 3, 6, 12, 24]
-ROLLING_WINDOWS = []  # 移除滾動窗口特徵
+LAG_HOURS = [1]
+ROLLING_WINDOWS = []
 
-# ❌ 核心修改 2: 移除預設地點（設為 None）
-DEFAULT_LOCATION_ID = None
-DEFAULT_LOCATION_NAME = None
-TARGET_LAT = None  # 不再有預設座標
-TARGET_LON = None
+# ✅ 新增：預設位置（台灣台中）作為後備
+DEFAULT_LAT = 24.1477
+DEFAULT_LON = 120.6736
+DEFAULT_LOCATION_NAME = "台中市"
 
 # Global Variables
 TRAINED_MODELS = {} 
@@ -471,7 +467,7 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
     return np.max(sub_indices)
 
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24, weather_df=None):
-    """多污染物預測（修復版：處理缺失污染物）"""
+    """多污染物預測"""
     predictions = []
 
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
@@ -482,7 +478,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    # ✅ 修改：用 0 填充缺失值，而非 NaN
     current_data_dict = {}
     available_pollutants = []
     
@@ -492,7 +487,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             val = last_data[col].iloc[0]
             if pd.notna(val):
                 current_data_dict[col] = float(val)
-                # 記錄哪些污染物有數據
                 if col.endswith('_lag_1h') and not col.startswith('aqi'):
                     param = col.replace('_lag_1h', '')
                     if param in pollutant_params:
@@ -536,7 +530,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             future_time = last_datetime_aware + timedelta(hours=h + 1)
             pred_features = current_data_dict.copy()
 
-            # 時間特徵
             pred_features['hour'] = future_time.hour
             pred_features['day_of_week'] = future_time.dayofweek
             pred_features['month'] = future_time.month
@@ -547,7 +540,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
             pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
-            # 天氣特徵
             if has_weather and weather_dict:
                 weather_key = future_time.replace(minute=0, second=0, microsecond=0)
                 
@@ -558,21 +550,18 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                             pred_features[w_col] = forecast[w_col]
                             current_data_dict[w_col] = forecast[w_col]
                 else:
-                    # 使用前一小時的天氣數據
                     for w_col in weather_feature_names:
                         pred_features[w_col] = current_data_dict.get(w_col, 0.0)
 
             current_prediction_row = {'datetime': future_time}
             new_pollutant_values = {}
 
-            # ✅ 對每個污染物單獨預測
             for param in pollutant_params:
                 if param not in models:
                     if param not in skipped_reasons:
                         skipped_reasons[param] = "模型不存在"
                     continue
 
-                # ✅ 檢查該污染物是否有初始數據
                 param_lag_col = f'{param}_lag_1h'
                 if param_lag_col not in pred_features or pred_features[param_lag_col] == 0.0:
                     if param not in skipped_reasons:
@@ -581,7 +570,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
 
                 model = models[param]
                 
-                # 準備輸入，用 0 填充所有 NaN
                 pred_input_list = []
                 for col in feature_cols:
                     val = pred_features.get(col, 0.0)
@@ -607,7 +595,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 new_pollutant_values['aqi'] = predicted_aqi
                 predictions.append(current_prediction_row)
 
-                # 更新 lag 特徵
                 for param in list(new_pollutant_values.keys()):
                     if param == 'aqi':
                         lag_col = 'aqi_lag_1h'
@@ -692,30 +679,27 @@ def index():
         print("🚀 [Request] 開始處理新請求")
         print("="*60)
 
-        # ✅ 核心修改 3: 必須提供座標，否則報錯
+        # ✅ 修改：優雅處理缺少座標的情況
         lat_param = request.args.get('lat', type=float)
         lon_param = request.args.get('lon', type=float)
 
         if lat_param is None or lon_param is None:
-            print("❌ [Request] 缺少 lat/lon 參數")
-            return render_template(
-                'index.html',
-                max_aqi="ERROR",
-                aqi_predictions=[],
-                city_name="錯誤：需要提供座標",
-                current_obs_time="N/A",
-                is_fallback=True,
-                error_message="請允許瀏覽器定位或手動提供座標參數"
-            )
+            print(f"⚠️ [Request] 缺少座標參數，使用預設位置：{DEFAULT_LOCATION_NAME}")
+            user_lat, user_lon = DEFAULT_LAT, DEFAULT_LON
+            using_default = True
+        else:
+            user_lat, user_lon = lat_param, lon_param
+            using_default = False
+            print(f"📍 [Request] 使用用戶座標 → lat={user_lat}, lon={user_lon}")
 
-        user_lat, user_lon = lat_param, lon_param
-        print(f"📍 [Request] 使用座標 → lat={user_lat}, lon={user_lon}")
-
-        # ✅ 核心修改 4: 找不到測站直接報錯，不回退
+        # 搜尋最近測站
         loc_id, loc_name, lat_found, lon_found = get_nearest_location(user_lat, user_lon)
         
         if loc_id is None:
             print("❌ [Station] 找不到任何測站")
+            error_msg = f"附近 25km 內沒有可用的空氣品質監測站"
+            if using_default:
+                error_msg = f"預設位置（{DEFAULT_LOCATION_NAME}）" + error_msg
             return render_template(
                 'index.html',
                 max_aqi="N/A",
@@ -723,7 +707,7 @@ def index():
                 city_name=f"({user_lat:.4f}, {user_lon:.4f})",
                 current_obs_time="N/A",
                 is_fallback=True,
-                error_message="您所在區域附近 25km 內沒有可用的空氣品質監測站"
+                error_message=error_msg
             )
 
         current_location_id = loc_id
@@ -857,7 +841,7 @@ def health_check():
         'pollutants': POLLUTANT_PARAMS,
         'features': len(FEATURE_COLUMNS),
         'python_version': sys.version,
-        'simplified_mode': 'Only 1-hour lag features'
+        'default_location': f"{DEFAULT_LOCATION_NAME} ({DEFAULT_LAT}, {DEFAULT_LON})"
     }
 
 if __name__ == '__main__':
