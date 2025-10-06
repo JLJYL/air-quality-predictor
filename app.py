@@ -1,11 +1,8 @@
-# app.py - 完整最終修復版
-# 修復：測站參數檢測、天氣 API 相容性、無天氣數據預測
+
 
 import requests
 import pandas as pd
 import datetime
-import random
-import re
 import os
 import warnings
 import numpy as np
@@ -26,17 +23,21 @@ API_KEY = "fb579916623e8483cd85344b14605c3109eea922202314c44b87a2df3b1fff77"
 HEADERS = {"X-API-Key": API_KEY}
 BASE = "https://api.openaq.org/v3"
 
-TARGET_LAT = 22.6324 
-TARGET_LON = 120.2954
-
-DEFAULT_LOCATION_ID = 2395624
-DEFAULT_LOCATION_NAME = "Kaohsiung-Qianjin"
-
 TARGET_PARAMS = ["co", "no2", "o3", "pm10", "pm25", "so2"]
 PARAM_IDS = {"co": 8, "no2": 7, "o3": 10, "pm10": 1, "pm25": 2, "so2": 9}
 
 TOL_MINUTES_PRIMARY = 120
 TOL_MINUTES_FALLBACK = 180
+
+# ✅ 核心修改 1: 只用 1 小時 lag
+LAG_HOURS = [1]  # 原本是 [1, 2, 3, 6, 12, 24]
+ROLLING_WINDOWS = []  # 移除滾動窗口特徵
+
+# ❌ 核心修改 2: 移除預設地點（設為 None）
+DEFAULT_LOCATION_ID = None
+DEFAULT_LOCATION_NAME = None
+TARGET_LAT = None  # 不再有預設座標
+TARGET_LON = None
 
 # Global Variables
 TRAINED_MODELS = {} 
@@ -48,13 +49,10 @@ HOURS_TO_PREDICT = 24
 CURRENT_OBSERVATION_AQI = "N/A"
 CURRENT_OBSERVATION_TIME = "N/A"
 
-current_location_id = DEFAULT_LOCATION_ID
-current_location_name = DEFAULT_LOCATION_NAME
+current_location_id = None
+current_location_name = None
 
-# Constants
 LOCAL_TZ = "Asia/Taipei"
-LAG_HOURS = [1, 2, 3, 6, 12, 24]
-ROLLING_WINDOWS = [6, 12, 24]
 POLLUTANT_TARGETS = ["pm25", "pm10", "o3", "no2", "so2", "co"] 
 
 AQI_BREAKPOINTS = {
@@ -82,10 +80,7 @@ def get_location_meta(location_id: int):
         return None
 
 def get_nearest_location(lat: float, lon: float, radius_km: int = 25): 
-    """
-    搜尋最近且數據完整的監測站（終極修復版）
-    修復：從 sensors.parameter.name 提取監測項目
-    """
+    """搜尋最近且數據完整的監測站"""
     V3_LOCATIONS_URL = f"{BASE}/locations"
     radius_meters = radius_km * 1000
     
@@ -113,7 +108,6 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
             station_name = station.get("name", "Unknown")
             distance = station.get("distance", 0)
             
-            # ✅ 修復：從 sensors 欄位提取參數
             sensors = station.get("sensors", [])
             param_names = []
             
@@ -124,10 +118,8 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
                     if param_name:
                         param_names.append(param_name)
             
-            # 計算符合目標的參數數量
             param_count = len([p for p in param_names if p in TARGET_PARAMS])
             
-            # 檢查最近更新時間
             last_update = station.get("datetimeLast", {}).get("utc")
             hours_since_update = 999
             if last_update:
@@ -137,12 +129,10 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
             print(f"   [{idx+1}] {station_name}: {param_count} 項目, "
                   f"{hours_since_update:.1f}h 前更新, 距離 {distance/1000:.1f}km")
             
-            # 顯示監測項目（調試用）
             if param_names:
                 unique_params = sorted(set([p for p in param_names if p in TARGET_PARAMS]))
                 print(f"       → 監測項目: {', '.join(unique_params)}")
             
-            # 優先選擇：1) 24小時內有更新 2) 參數最多 3) 距離較近
             if hours_since_update <= 24 and param_count > max_params:
                 max_params = param_count
                 best_station = station
@@ -150,30 +140,20 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
                 if distance < best_station.get("distance", 999999):
                     best_station = station
         
-        # 如果沒有找到 24 小時內更新的，就用距離最近的
         if best_station is None:
-            # 優先選擇忠明站（台中地區特殊處理）
-            for station in results:
-                if "忠明" in station.get("name", ""):
-                    best_station = station
-                    print("✅ [Nearest] 特別選擇台中忠明站")
-                    break
+            for station in sorted(results, key=lambda s: s.get("distance", 999999)):
+                last_update = station.get("datetimeLast", {}).get("utc")
+                if last_update:
+                    last_update_dt = pd.to_datetime(last_update, utc=True)
+                    days_since = (pd.Timestamp.now(tz='UTC') - last_update_dt).days
+                    if days_since < 30:
+                        best_station = station
+                        print(f"⚠️ [Nearest] 選擇距離最近且 {days_since} 天內有更新的測站")
+                        break
             
             if best_station is None:
-                # 選擇有數據的最近測站（排除已停用的）
-                for station in sorted(results, key=lambda s: s.get("distance", 999999)):
-                    last_update = station.get("datetimeLast", {}).get("utc")
-                    if last_update:
-                        last_update_dt = pd.to_datetime(last_update, utc=True)
-                        days_since = (pd.Timestamp.now(tz='UTC') - last_update_dt).days
-                        if days_since < 30:  # 30天內有更新
-                            best_station = station
-                            print(f"⚠️ [Nearest] 選擇距離最近且 {days_since} 天內有更新的測站")
-                            break
-            
-            if best_station is None:
-                best_station = results[0]
-                print("⚠️ [Nearest] 使用距離最近的測站（可能已停用）")
+                print("❌ [Nearest] 找不到任何有效測站")
+                return None, None, None, None
         
         loc_id = int(best_station["id"])
         loc_name = best_station["name"]
@@ -182,7 +162,6 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
         lon_found = coords.get("longitude", lon)
         distance = best_station.get("distance", 0)
         
-        # 重新計算這個測站的參數數量（確保準確）
         sensors = best_station.get("sensors", [])
         final_param_names = []
         for sensor in sensors:
@@ -201,8 +180,6 @@ def get_nearest_location(lat: float, lon: float, radius_km: int = 25):
 
     except Exception as e:
         print(f"❌ [Nearest] 搜尋失敗: {e}")
-        import traceback
-        traceback.print_exc()
         return None, None, None, None
 
 def get_location_latest_df(location_id: int) -> pd.DataFrame:
@@ -287,14 +264,11 @@ def get_parameters_latest_df(location_id: int, target_params) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.concat(rows, ignore_index=True)
 
-
 cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
 openmeteo_client = openmeteo_requests.Client(session=cache_session)
 
 def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
-    """
-    從 Open-Meteo 獲取天氣預報（多版本相容）
-    """
+    """從 Open-Meteo 獲取天氣預報"""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
@@ -363,10 +337,7 @@ def get_weather_forecast(lat: float, lon: float) -> pd.DataFrame:
         
     except Exception as e:
         print(f"❌ [Weather] 獲取失敗: {e}")
-        import traceback
-        traceback.print_exc()
         return pd.DataFrame()
-
 
 def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> pd.DataFrame:
     """Selects the batch of data closest to t_ref and within tol_minutes."""
@@ -393,7 +364,6 @@ def pick_batch_near(df: pd.DataFrame, t_ref: pd.Timestamp, tol_minutes: int) -> 
     df = df.sort_values(["parameter", "dt_diff", "ts_utc"], ascending=[True, True, False])
     df = df.drop_duplicates(subset=["parameter"], keep="first")
     return df[["parameter", "value", "units", "ts_utc", "ts_local"]]
-
 
 def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.DataFrame:
     """Fetches the latest observation data from OpenAQ."""
@@ -458,7 +428,6 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
 
     return observation
 
-
 def calculate_aqi_sub_index(param: str, concentration: float) -> float:
     """Calculates the AQI sub-index."""
     if pd.isna(concentration) or concentration < 0:
@@ -501,12 +470,9 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
 
     return np.max(sub_indices)
 
-
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24, weather_df=None):
-    """多污染物預測（允許無天氣數據）"""
+    """多污染物預測（簡化為 1 小時 lag）"""
     predictions = []
-    pd.set_option('display.max_columns', 10)
-    pd.set_option('display.width', 140)
 
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
     if last_data['datetime'].dt.tz is None:
@@ -545,7 +511,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         print("⚠️ [Weather] 無天氣數據，將使用歷史天氣值")
 
     total_predictions = 0
-    feature_nan_warnings = 0
 
     try:
         for h in range(hours):
@@ -587,9 +552,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 
                 nan_count = sum(1 for x in pred_input_list if pd.isna(x))
                 if nan_count > len(pred_input_list) * 0.5:
-                    if feature_nan_warnings < 3:
-                        print(f"⚠️ [Predict] {param} 特徵缺失過多 ({nan_count}/{len(pred_input_list)})")
-                        feature_nan_warnings += 1
                     continue
 
                 pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
@@ -606,15 +568,11 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 new_pollutant_values['aqi'] = predicted_aqi
                 predictions.append(current_prediction_row)
 
+                # ✅ 簡化更新邏輯：只更新 1 小時 lag
                 for param in pollutant_params + ['aqi']:
-                    for i in range(len(LAG_HOURS) - 1, 0, -1):
-                        lag_current_col = f'{param}_lag_{LAG_HOURS[i]}h'
-                        lag_prev_col = f'{param}_lag_{LAG_HOURS[i-1]}h'
-                        if lag_current_col in current_data_dict and lag_prev_col in current_data_dict:
-                            current_data_dict[lag_current_col] = current_data_dict[lag_prev_col]
-
-                    if f'{param}_lag_1h' in current_data_dict and param in new_pollutant_values:
-                        current_data_dict[f'{param}_lag_1h'] = new_pollutant_values[param]
+                    lag_col = f'{param}_lag_1h'
+                    if lag_col in current_data_dict and param in new_pollutant_values:
+                        current_data_dict[lag_col] = new_pollutant_values[param]
 
         print(f"\n✅ [Predict] 成功生成 {len(predictions)} 個預測時間點")
         print(f"   模型調用總次數: {total_predictions}")
@@ -625,7 +583,6 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         traceback.print_exc()
 
     return pd.DataFrame(predictions)
-
 
 def load_models_and_metadata():
     global TRAINED_MODELS, LAST_OBSERVATION, FEATURE_COLUMNS, POLLUTANT_PARAMS
@@ -670,55 +627,63 @@ def load_models_and_metadata():
         print(f"❌ [Load] 模型載入失敗: {e}") 
         import traceback
         traceback.print_exc()
-        TRAINED_MODELS = {} 
-        LAST_OBSERVATION = None
-        FEATURE_COLUMNS = []
-        POLLUTANT_PARAMS = []
-
 
 app = Flask(__name__)
 
 with app.app_context():
     load_models_and_metadata() 
 
-
 @app.route('/')
 def index():
     """主路由"""
     global CURRENT_OBSERVATION_AQI, CURRENT_OBSERVATION_TIME
     global current_location_id, current_location_name
-    global TARGET_LAT, TARGET_LON
     
     try:
         print("\n" + "="*60)
         print("🚀 [Request] 開始處理新請求")
         print("="*60)
-        
-        station_lat, station_lon = TARGET_LAT, TARGET_LON
 
+        # ✅ 核心修改 3: 必須提供座標，否則報錯
         lat_param = request.args.get('lat', type=float)
         lon_param = request.args.get('lon', type=float)
 
-        if lat_param is not None and lon_param is not None:
-            TARGET_LAT, TARGET_LON = lat_param, lon_param
-            print(f"🌍 [Request] 使用動態座標 → lat={TARGET_LAT}, lon={TARGET_LON}")
-        else:
-            print(f"⚙️ [Request] 使用預設座標 → lat={TARGET_LAT}, lon={TARGET_LON}")
+        if lat_param is None or lon_param is None:
+            print("❌ [Request] 缺少 lat/lon 參數")
+            return render_template(
+                'index.html',
+                max_aqi="ERROR",
+                aqi_predictions=[],
+                city_name="錯誤：需要提供座標",
+                current_obs_time="N/A",
+                is_fallback=True,
+                error_message="請允許瀏覽器定位或手動提供座標參數"
+            )
 
-        loc_id, loc_name, lat_found, lon_found = get_nearest_location(TARGET_LAT, TARGET_LON)
-        if loc_id:
-            current_location_id = loc_id
-            current_location_name = loc_name
-            station_lat, station_lon = lat_found, lon_found
-        else:
-            print("⚠️ [Station] 使用預設測站")
-            current_location_id = DEFAULT_LOCATION_ID
-            current_location_name = DEFAULT_LOCATION_NAME
+        user_lat, user_lon = lat_param, lon_param
+        print(f"📍 [Request] 使用座標 → lat={user_lat}, lon={user_lon}")
+
+        # ✅ 核心修改 4: 找不到測站直接報錯，不回退
+        loc_id, loc_name, lat_found, lon_found = get_nearest_location(user_lat, user_lon)
+        
+        if loc_id is None:
+            print("❌ [Station] 找不到任何測站")
+            return render_template(
+                'index.html',
+                max_aqi="N/A",
+                aqi_predictions=[],
+                city_name=f"({user_lat:.4f}, {user_lon:.4f})",
+                current_obs_time="N/A",
+                is_fallback=True,
+                error_message="您所在區域附近 25km 內沒有可用的空氣品質監測站"
+            )
+
+        current_location_id = loc_id
+        current_location_name = loc_name
+        station_lat, station_lon = lat_found, lon_found
 
         print(f"\n🌤️  [Weather] 獲取天氣預報 ({station_lat}, {station_lon})")
         weather_forecast_df = get_weather_forecast(station_lat, station_lon)
-        if weather_forecast_df.empty:
-            print("⚠️ [Weather] 天氣預報為空，將使用歷史天氣值進行預測")
 
         print(f"\n📊 [Observation] 獲取觀測數據 (測站 ID: {current_location_id})")
         current_observation_raw = fetch_latest_observation_data(current_location_id, POLLUTANT_TARGETS)
@@ -754,10 +719,6 @@ def index():
             else:
                 observation_for_prediction['datetime'] = observation_for_prediction['datetime'].dt.tz_convert('UTC')
             is_valid_for_prediction = True
-        elif LAST_OBSERVATION is not None and not LAST_OBSERVATION.empty:
-            observation_for_prediction = LAST_OBSERVATION.iloc[:1].copy()
-            is_valid_for_prediction = True
-            print("⚠️ [Fallback] 使用歷史觀測數據")
 
         max_aqi = CURRENT_OBSERVATION_AQI
         aqi_predictions = []
@@ -797,8 +758,6 @@ def index():
                     if aqi_predictions:
                         is_fallback_mode = False
                         print(f"✅ [Predict] 預測成功")
-                        print(f"   時間點數: {len(aqi_predictions)}")
-                        print(f"   AQI 範圍: {predictions_df['aqi_pred'].min():.0f} ~ {predictions_df['aqi_pred'].max():.0f}")
                         
             except Exception as e:
                 print(f"❌ [Predict] 預測失敗: {e}")
@@ -840,7 +799,6 @@ def index():
             is_fallback=True
         )
 
-
 @app.route('/health')
 def health_check():
     """健康檢查端點"""
@@ -850,30 +808,9 @@ def health_check():
         'models_loaded': len(TRAINED_MODELS),
         'pollutants': POLLUTANT_PARAMS,
         'features': len(FEATURE_COLUMNS),
-        'last_observation_available': LAST_OBSERVATION is not None,
         'python_version': sys.version,
-        'models_dir_exists': os.path.exists(MODELS_DIR),
-        'model_files': os.listdir(MODELS_DIR) if os.path.exists(MODELS_DIR) else []
+        'simplified_mode': 'Only 1-hour lag features'
     }
-
-@app.route('/test-station')
-def test_station():
-    """測試測站選擇邏輯"""
-    lat = request.args.get('lat', 24.1516, type=float)
-    lon = request.args.get('lon', 120.6424, type=float)
-    
-    loc_id, loc_name, lat_found, lon_found = get_nearest_location(lat, lon)
-    
-    return {
-        'input': {'lat': lat, 'lon': lon},
-        'result': {
-            'station_id': loc_id,
-            'station_name': loc_name,
-            'station_lat': lat_found,
-            'station_lon': lon_found
-        }
-    }
-
 
 if __name__ == '__main__':
     app.run(debug=True)
