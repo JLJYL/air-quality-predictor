@@ -455,15 +455,11 @@ def fetch_latest_observation_data(location_id: int, target_params: list) -> pd.D
     df_all = df_all.drop_duplicates(subset=["parameter"], keep="first")
     df_all = df_all.drop(columns=["dt_diff", "units", "ts_local"])
 
-    # ⭐️ 修正：數據清洗步驟，處理非物理佔位符數值
-    # 將所有數值 >= 5000.0 的項目替換為 NaN
-    HIGH_VALUE_THRESHOLD = 5000.0 
-    df_all.loc[df_all['value'] >= HIGH_VALUE_THRESHOLD, 'value'] = np.nan
-    
     # 4. Convert to model input format (single-row wide table)
     observation = df_all.pivot_table(
         index='ts_utc', columns='parameter', values='value', aggfunc='first'
-    ).reset_index()    observation = observation.rename(columns={'ts_utc': 'datetime'})
+    ).reset_index()
+    observation = observation.rename(columns={'ts_utc': 'datetime'})
     
     # Calculate AQI
     if not observation.empty:
