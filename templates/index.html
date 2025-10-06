@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AQI Forecast</title>
+  <title>AQI 觀測趨勢</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
@@ -28,192 +28,147 @@
   </style>
 
   <script>
+  // 從後端接收的數據會放在這個變數中，用於繪圖
+  const chartData = JSON.parse('{{ chart_data | tojson | safe }}');
+  const locationName = '{{ location_name | default("N/A") }}';
+  const latestAqi = '{{ latest_aqi | default("N/A") }}';
+  const latestTime = '{{ latest_time | default("N/A") }}';
+
+  // --- 定位功能：取得用戶座標並重新導向 ---
+  const requestLocation = () => {
+    // 檢查 URL 中是否已經有 lat/lon 參數
+    const currentParams = new URLSearchParams(window.location.search);
+    if (currentParams.has('lat') && currentParams.has('lon')) {
+        // 如果已經有座標，則跳過，讓 DOMContentLoaded 繼續執行
+        return; 
+    }
+
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const lat = position.coords.latitude;
+                const lon = position.coords.longitude;
+                // 成功取得座標後，重新載入頁面並帶上座標參數
+                window.location.search = `?lat=${lat}&lon=${lon}`;
+            },
+            (error) => {
+                // 如果定位失敗，則繼續執行，讓後端使用預設座標
+                console.warn('Geolocation failed:', error);
+                document.getElementById('loadingOverlay').style.display = 'none';
+            },
+            { enableHighAccuracy: false, timeout: 5000, maximumAge: 0 }
+        );
+    } else {
+        console.warn('Geolocation is not supported by this browser.');
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+  }
+  
+  // 在頁面載入時先嘗試取得座標
+  requestLocation();
+  // ---------------------------------------------
+
+
   document.addEventListener("DOMContentLoaded", function () {
-      const params = new URLSearchParams(window.location.search);
-      if (params.has("lat") && params.has("lon")) {
-          document.getElementById("loadingOverlay").style.display = "none";
-          document.getElementById("content").style.display = "block";
+      const loadingOverlay = document.getElementById('loadingOverlay');
+      const errorDiv = document.getElementById('error-message');
+      
+      // 處理錯誤訊息
+      const errorMessage = '{{ error_message | default("") }}';
+      if (errorMessage) {
+          errorDiv.textContent = errorMessage;
+          errorDiv.classList.remove('hidden');
+          loadingOverlay.style.display = 'none';
           return;
       }
+      
+      // 顯示最新 AQI 資訊
+      document.getElementById('location-name').textContent = locationName;
+      document.getElementById('latest-aqi-value').textContent = latestAqi;
+      document.getElementById('latest-time-value').textContent = latestTime;
 
-      const overlay = document.getElementById("loadingOverlay");
-      overlay.style.display = "flex";
-      const loadingText = document.getElementById("loadingText");
+      // 根據 U.S. EPA AQI 顏色標準
+      const aqiBox = document.getElementById('latest-aqi-box');
+      const aqi = parseInt(latestAqi);
+      if (!isNaN(aqi)) {
+          if (aqi <= 50) {
+              aqiBox.className = 'bg-green-500'; // 綠色 (Good)
+          } else if (aqi <= 100) {
+              aqiBox.className = 'bg-yellow-500'; // 黃色 (Moderate)
+          } else if (aqi <= 150) {
+              aqiBox.className = 'bg-orange-500'; // 橘色 (Unhealthy for Sensitive Groups)
+          } else if (aqi <= 200) {
+              aqiBox.className = 'bg-red-500'; // 紅色 (Unhealthy)
+          } else if (aqi <= 300) {
+              aqiBox.className = 'bg-purple-600'; // 紫色 (Very Unhealthy)
+          } else {
+              aqiBox.className = 'bg-maroon-700'; // 褐紅色 (Hazardous)
+          }
+      }
 
-      if (navigator.geolocation) {
-          loadingText.innerText = "正在取得您的位置...";
-          
-          navigator.geolocation.getCurrentPosition(
-              (position) => {
-                  const lat = position.coords.latitude.toFixed(6);
-                  const lon = position.coords.longitude.toFixed(6);
-                  loadingText.innerText = "定位完成，正在載入空氣品質資料...";
-                  const baseUrl = window.location.origin + window.location.pathname;
-                  setTimeout(() => {
-                      window.location.href = `${baseUrl}?lat=${lat}&lon=${lon}`;
-                  }, 800);
-              },
-              (error) => {
-                  loadingText.innerText = "無法取得定位，將使用預設高雄資料...";
-                  setTimeout(() => { 
-                      overlay.style.display = "none"; 
-                      document.getElementById("content").style.display = "block";
-                  }, 1500);
-              },
-              { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-          );
+      // 繪製圖表
+      if (chartData && chartData.length > 0) {
+          renderChart(chartData, locationName);
+      }
+      
+      // 如果已經執行到這裡，且沒有錯誤，代表數據已載入或正在等待定位
+      if (!errorMessage && (!chartData || chartData.length === 0)) {
+          // 如果沒有圖表數據但沒有錯誤，可能是在等待定位或第一次載入
       } else {
-          loadingText.innerText = "您的瀏覽器不支援定位，使用預設資料";
-          setTimeout(() => { 
-              overlay.style.display = "none"; 
-              document.getElementById("content").style.display = "block";
-          }, 1500);
+          loadingOverlay.style.display = 'none';
       }
   });
-  </script>
-</head>
 
-<body class="p-8 min-h-screen">
-  <!-- Loading 畫面 -->
-  <div id="loadingOverlay">
-      <div class="spinner mb-4"></div>
-      <p id="loadingText" class="text-gray-700 text-lg font-medium">正在初始化...</p>
-  </div>
+  const renderChart = (data, locationName) => {
+      
+      // 提取標籤 (X 軸) 和數據 (Y 軸)
+      const labels = data.map(d => d.datetime.split(' ')[1]); // 只取時間部分
+      const aqiValues = data.map(d => d.aqi); // 觀測 AQI 值
 
-  <!-- 主內容 -->
-  <div class="max-w-6xl mx-auto" style="display:none" id="content">
-      <header class="text-center mb-10">
-          <h2 class="text-4xl font-extrabold text-gray-900 mb-2">
-              Air Quality Forecast for {{ city_name }} Station
-          </h2>
-          <p class="text-lg text-gray-600">24-Hour AQI Trend</p>
-          {% if current_obs_time != "N/A" %}
-          <p class="text-sm text-gray-500 mt-1">最近觀測時間: {{ current_obs_time }}</p>
-          {% endif %}
-      </header>
-
-      <div id="maxAqiCard" class="shadow-2xl rounded-xl p-8 mb-10 text-white flex justify-between items-center" 
-           style="background-color: #2c3e50;">
-          <div>
-              <p class="text-lg font-medium opacity-80">
-                  {% if is_fallback %}
-                  當前觀測 AQI
-                  {% else %}
-                  未來 24 小時最高 AQI
-                  {% endif %}
-              </p>
-              <h2 id="maxAqiValue" class="text-7xl font-black mt-1">
-                  {{ max_aqi }}
-              </h2>
-          </div>
-          <div 
-            id="aqiStatus"
-            class="rounded-full px-6 py-2 text-xl font-bold text-white shadow-md
-            {% if max_aqi == 'N/A' or max_aqi == 'ERROR' %}
-                bg-gray-500
-            {% elif max_aqi | int <= 50 %}
-                bg-green-500
-            {% elif max_aqi | int <= 100 %}
-                bg-yellow-500
-            {% elif max_aqi | int <= 150 %}
-                bg-orange-500
-            {% elif max_aqi | int <= 200 %}
-                bg-red-600
-            {% else %}
-                bg-purple-700
-            {% endif %}
-            ">
-            {% if max_aqi == "N/A" %}
-                無數據
-            {% elif max_aqi == "ERROR" %}
-                錯誤
-            {% elif max_aqi | int <= 50 %}
-                Good
-            {% elif max_aqi | int <= 100 %}
-                Moderate
-            {% elif max_aqi | int <= 150 %}
-                Unhealthy for Sensitive Groups
-            {% elif max_aqi | int <= 200 %}
-                Unhealthy
-            {% else %}
-                Very Unhealthy
-            {% endif %}
-            </div>
-      </div>
-
-      <!-- AQI Chart -->
-      <div class="bg-white rounded-xl shadow-xl p-6 mb-10">
-          <h3 class="text-2xl font-bold text-gray-800 mb-4">
-              {% if is_fallback %}
-              當前 AQI（無預測數據）
-              {% else %}
-              AQI 趨勢預測
-              {% endif %}
-          </h3>
-          <div class="relative" style="height: 400px;">
-              <canvas id="aqiChart"></canvas>
-          </div>
-          <div id="noDataWarning" style="display: none;" class="text-center py-8">
-              <p class="text-gray-500 text-lg">⚠️ 暫無預測數據</p>
-              <p class="text-gray-400 text-sm mt-2">可能原因：模型未載入或測站數據不足</p>
-          </div>
-      </div>
-  </div>
-
-  <script>
-  window.onload = function() {
-      document.getElementById("content").style.display = "block";
-
-      let predictions = [];
-      try {
-          const jsonStr = '{{ aqi_predictions | tojson | safe }}';
-          predictions = JSON.parse(jsonStr);
-      } catch (e) { 
-          console.error('JSON parsing failed:', e);
-      }
-
-      if (!predictions || predictions.length === 0) {
-          document.getElementById('noDataWarning').style.display = 'block';
-          document.getElementById('aqiChart').style.display = 'none';
-          return;
-      }
-
-      const labels = predictions.map(p => p.time);
-      const data = predictions.map(p => (p.aqi === "N/A" ? null : p.aqi));
-
-      const ctx = document.getElementById('aqiChart').getContext('2d');
-      const validData = data.filter(v => v !== null);
-      const yMax = validData.length > 0 
-          ? Math.ceil(Math.max(...validData) / 50) * 50 + 10 
-          : 100;
+      // 找出最大的 AQI 值來設定 Y 軸上限
+      const maxAqi = Math.max(...aqiValues);
+      const yMax = Math.max(100, Math.ceil(maxAqi / 50) * 50);
 
       try {
-          new Chart(ctx, {
+          const ctx = document.getElementById('aqiChart').getContext('2d');
+          
+          if (window.aqiChart) {
+              window.aqiChart.destroy();
+          }
+
+          window.aqiChart = new Chart(ctx, {
               type: 'line',
               data: {
                   labels: labels,
                   datasets: [{
-                      label: 'AQI',
-                      data: data,
+                      label: '觀測 AQI (Observed AQI)', // 標籤改為觀測 AQI
+                      data: aqiValues,
                       borderColor: '#3B82F6',
-                      backgroundColor: 'rgba(59,130,246,0.15)',
-                      borderWidth: 3,
+                      backgroundColor: 'rgba(59, 130, 246, 0.1)',
                       fill: true,
-                      tension: 0.4,
-                      pointRadius: 5,
-                      pointBackgroundColor: data.map(v => {
-                          if (v === null) return '#9CA3AF';
-                          if (v <= 50) return '#10B981';
-                          if (v <= 100) return '#EAB308';
-                          if (v <= 150) return '#F97316';
-                          if (v <= 200) return '#DC2626';
-                          return '#7C3AED';
-                      })
+                      tension: 0.3,
+                      pointRadius: 3,
+                      pointHoverRadius: 5,
+                      pointBackgroundColor: (context) => {
+                          const v = context.raw;
+                          if (v <= 50) return '#10B981'; // 綠
+                          if (v <= 100) return '#EAB308'; // 黃
+                          if (v <= 150) return '#F97316'; // 橘
+                          if (v <= 200) return '#DC2626'; // 紅
+                          return '#7C3AED'; // 紫 (非常不健康)
+                      },
                   }]
               },
               options: {
                   responsive: true,
                   maintainAspectRatio: false,
+                  plugins: {
+                      title: {
+                          display: true,
+                          text: `過去 24 小時 ${locationName} 實際觀測 AQI 趨勢 (U.S. EPA 2024)`,
+                          font: { size: 16 }
+                      }
+                  },
                   scales: {
                       y: {
                           beginAtZero: true,
@@ -230,6 +185,7 @@
                               minRotation: 45,
                               callback: function(value, index) {
                                   const fullLabel = this.getLabelForValue(value);
+                                  // 只顯示時間
                                   return (index % 6 === 0) ? fullLabel : fullLabel.split(' ')[1];
                               }
                           }
@@ -242,5 +198,47 @@
       }
   };
   </script>
+</head>
+<body class="p-4 sm:p-8">
+
+  <div id="loadingOverlay">
+    <div class="spinner"></div>
+    <p class="mt-4 text-gray-700">正在抓取歷史觀測數據...</p>
+    <p class="mt-2 text-sm text-gray-500">如果停留過久，可能是瀏覽器正在請求您的地理位置資訊。</p>
+  </div>
+
+  <div id="error-message" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-6" role="alert">
+    </div>
+
+  <h1 class="text-3xl font-bold text-gray-800 mb-6">空氣品質觀測儀 (U.S. EPA 2024 標準)</h1>
+
+  <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-600">監測站位置</h2>
+        <p id="location-name" class="text-2xl font-bold text-gray-800">{{ location_name | default('N/A') }}</p>
+      </div>
+      <div class="flex items-center space-x-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-600 text-right">最新觀測時間 (臺灣)</h2>
+          <p id="latest-time-value" class="text-xl font-bold text-gray-800 text-right">{{ latest_time | default('N/A') }}</p>
+        </div>
+        <div id="latest-aqi-box" class="w-24 h-24 flex flex-col items-center justify-center rounded-lg shadow-lg">
+          <span class="text-xs font-semibold text-white">觀測 AQI</span>
+          <p id="latest-aqi-value" class="text-4xl font-extrabold text-white leading-none">{{ latest_aqi | default('N/A') }}</p>
+        </div>
+      </div>
+    </div>
+    <p class="mt-4 text-sm text-gray-500">
+      * 數據來自 OpenAQ 觀測資料，AQI 根據 **U.S. EPA 2024 標準**計算。
+    </p>
+  </div>
+
+  <div class="bg-white p-6 rounded-lg shadow-md">
+    <h2 class="text-xl font-semibold text-gray-800 mb-4">AQI 歷史觀測趨勢 (過去 24 小時)</h2>
+    <div class="relative h-96">
+      <canvas id="aqiChart"></canvas>
+    </div>
+  </div>
 </body>
 </html>
