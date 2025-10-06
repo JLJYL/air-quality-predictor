@@ -471,7 +471,7 @@ def calculate_aqi(row: pd.Series, params: list, is_pred=True) -> float:
     return np.max(sub_indices)
 
 def predict_future_multi(models, last_data, feature_cols, pollutant_params, hours=24, weather_df=None):
-    """多污染物預測（簡化為 1 小時 lag）"""
+    """多污染物預測（修復版：處理缺失污染物）"""
     predictions = []
 
     last_data['datetime'] = pd.to_datetime(last_data['datetime'])
@@ -482,12 +482,30 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
         
     last_datetime_aware = last_data['datetime'].iloc[0]
     
-    current_data_dict = {
-        col: last_data.get(col, pd.Series([np.nan])).iloc[0] 
-        if col in last_data.columns and not last_data[col].empty 
-        else np.nan 
-        for col in feature_cols
-    }
+    # ✅ 修改：用 0 填充缺失值，而非 NaN
+    current_data_dict = {}
+    available_pollutants = []
+    
+    print("\n🔍 [Init] 檢查觀測數據特徵:")
+    for col in feature_cols:
+        if col in last_data.columns and not last_data[col].empty:
+            val = last_data[col].iloc[0]
+            if pd.notna(val):
+                current_data_dict[col] = float(val)
+                # 記錄哪些污染物有數據
+                if col.endswith('_lag_1h') and not col.startswith('aqi'):
+                    param = col.replace('_lag_1h', '')
+                    if param in pollutant_params:
+                        available_pollutants.append(param)
+                print(f"   ✅ {col}: {val:.2f}")
+            else:
+                current_data_dict[col] = 0.0
+                print(f"   ⚠️ {col}: NaN → 0")
+        else:
+            current_data_dict[col] = 0.0
+            print(f"   ❌ {col}: 缺失 → 0")
+    
+    print(f"\n📊 [Init] 可用污染物: {available_pollutants}")
 
     weather_feature_names = ['temperature', 'humidity', 'pressure']
     weather_feature_names = [col for col in weather_feature_names if col in feature_cols]
@@ -508,15 +526,17 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             print(f"⚠️ [Weather] 天氣數據處理失敗: {e}")
             weather_dict = {}
     else:
-        print("⚠️ [Weather] 無天氣數據，將使用歷史天氣值")
+        print("⚠️ [Weather] 無天氣數據，將使用默認值")
 
     total_predictions = 0
+    skipped_reasons = {}
 
     try:
         for h in range(hours):
             future_time = last_datetime_aware + timedelta(hours=h + 1)
             pred_features = current_data_dict.copy()
 
+            # 時間特徵
             pred_features['hour'] = future_time.hour
             pred_features['day_of_week'] = future_time.dayofweek
             pred_features['month'] = future_time.month
@@ -527,6 +547,7 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
             pred_features['day_sin'] = np.sin(2 * np.pi * pred_features['day_of_year'] / 365)
             pred_features['day_cos'] = np.cos(2 * np.pi * pred_features['day_of_year'] / 365)
 
+            # 天氣特徵
             if has_weather and weather_dict:
                 weather_key = future_time.replace(minute=0, second=0, microsecond=0)
                 
@@ -537,30 +558,48 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                             pred_features[w_col] = forecast[w_col]
                             current_data_dict[w_col] = forecast[w_col]
                 else:
+                    # 使用前一小時的天氣數據
                     for w_col in weather_feature_names:
-                        pred_features[w_col] = current_data_dict.get(w_col, np.nan)
+                        pred_features[w_col] = current_data_dict.get(w_col, 0.0)
 
             current_prediction_row = {'datetime': future_time}
             new_pollutant_values = {}
 
+            # ✅ 對每個污染物單獨預測
             for param in pollutant_params:
                 if param not in models:
+                    if param not in skipped_reasons:
+                        skipped_reasons[param] = "模型不存在"
+                    continue
+
+                # ✅ 檢查該污染物是否有初始數據
+                param_lag_col = f'{param}_lag_1h'
+                if param_lag_col not in pred_features or pred_features[param_lag_col] == 0.0:
+                    if param not in skipped_reasons:
+                        skipped_reasons[param] = "缺少初始觀測值"
                     continue
 
                 model = models[param]
-                pred_input_list = [pred_features.get(col, np.nan) for col in feature_cols]
                 
-                nan_count = sum(1 for x in pred_input_list if pd.isna(x))
-                if nan_count > len(pred_input_list) * 0.5:
+                # 準備輸入，用 0 填充所有 NaN
+                pred_input_list = []
+                for col in feature_cols:
+                    val = pred_features.get(col, 0.0)
+                    pred_input_list.append(0.0 if pd.isna(val) else float(val))
+
+                try:
+                    pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
+                    pred = model.predict(pred_input)[0]
+                    pred = max(0, pred)
+
+                    current_prediction_row[f'{param}_pred'] = pred
+                    new_pollutant_values[param] = pred
+                    total_predictions += 1
+                    
+                except Exception as e:
+                    if param not in skipped_reasons:
+                        skipped_reasons[param] = f"預測錯誤: {str(e)[:50]}"
                     continue
-
-                pred_input = np.array(pred_input_list, dtype=np.float64).reshape(1, -1)
-                pred = model.predict(pred_input)[0]
-                pred = max(0, pred)
-
-                current_prediction_row[f'{param}_pred'] = pred
-                new_pollutant_values[param] = pred
-                total_predictions += 1
 
             if new_pollutant_values:
                 predicted_aqi = calculate_aqi(pd.Series(current_prediction_row), pollutant_params, is_pred=True)
@@ -568,14 +607,23 @@ def predict_future_multi(models, last_data, feature_cols, pollutant_params, hour
                 new_pollutant_values['aqi'] = predicted_aqi
                 predictions.append(current_prediction_row)
 
-                # ✅ 簡化更新邏輯：只更新 1 小時 lag
-                for param in pollutant_params + ['aqi']:
-                    lag_col = f'{param}_lag_1h'
-                    if lag_col in current_data_dict and param in new_pollutant_values:
+                # 更新 lag 特徵
+                for param in list(new_pollutant_values.keys()):
+                    if param == 'aqi':
+                        lag_col = 'aqi_lag_1h'
+                    else:
+                        lag_col = f'{param}_lag_1h'
+                    
+                    if lag_col in current_data_dict:
                         current_data_dict[lag_col] = new_pollutant_values[param]
 
         print(f"\n✅ [Predict] 成功生成 {len(predictions)} 個預測時間點")
         print(f"   模型調用總次數: {total_predictions}")
+        
+        if skipped_reasons:
+            print(f"\n⚠️ [Predict] 跳過的污染物:")
+            for param, reason in skipped_reasons.items():
+                print(f"   - {param}: {reason}")
 
     except Exception as e:
         print(f"❌ [Predict] 預測錯誤: {e}")
